@@ -1,0 +1,45 @@
+# Example Clevr policy document — "policy as code" format.
+#
+# Push it to your engine with:
+#   CLEVR_URL=http://localhost:8787 CLEVR_API_KEY=clevr_sk_... \
+#     npx @clevr/sdk policy push clevr.yaml
+#
+# Verdicts:
+#   permit  — let the action through (Clevr internal: allow)
+#   defer   — require human approval (Clevr internal: escalate / step-up)
+#   deny    — block (Clevr internal: block)
+#
+# Rules are evaluated top-to-bottom; the first match wins.
+# If no rule matches, the `default` verdict applies.
+
+version: 1
+agent:   acme-support-bot
+default: deny
+
+rules:
+  # Knowledge base — read-only is always fine
+  - permit: kb.search
+  - permit: kb.read
+
+  # Ticket workflow — agents can create + comment, not close
+  - permit: ticket.create
+  - permit: ticket.comment
+  - defer:  ticket.close
+    description: A human signs off before tickets close
+
+  # Email — only inside the org; external goes to human review
+  - permit: email.send
+    if:     target.domain == "@acme.com"
+  - defer:  email.send
+    description: External email needs a human approver
+
+  # Anything destructive is denied outright
+  - deny:   delete.*
+  - deny:   drop.*
+
+rate_limits:
+  email.send:    { max: 50,  per: hour }
+  ticket.create: { max: 200, per: day  }
+
+budget:
+  daily: { max_eur: 20, on_exceed: defer }

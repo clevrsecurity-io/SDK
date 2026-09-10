@@ -1,0 +1,50 @@
+{
+  "name": "@clevr/sdk",
+  "version": "0.2.0",
+  "description": "Clevr agent governance SDK — every agent action passes through a policy gate (allow / block / step-up) with a tamper-evident audit receipt. Hooks into raw code, Anthropic Messages, OpenAI tool_calls, Vercel AI SDK, LangChain.js, and MCP servers.",
+  "type": "module",
+  "main": "index.js",
+  "publishConfig": {
+    "access": "public"
+  },
+  "bin": {
+    "clevr": "./cli.js"
+  },
+  "exports": {
+    ".":                  "./index.js",
+    "./anthropic":        "./adapters/anthropic.js",
+    "./claude-agent-sdk": "./adapters/claude-agent-sdk.js",
+    "./openai":           "./adapters/openai.js",
+    "./vercel-ai":        "./adapters/vercel-ai.js",
+    "./langchain":        "./adapters/langchain.js",
+    "./mcp":              "./adapters/mcp.js",
+    "./express":          "./adapters/express.js"
+  },
+  "files": [
+    "index.js",
+    "cli.js",
+    "adapters/",
+    "examples/",
+    "README.md"
+  ],
+  "dependencies": {
+    "js-yaml": "^4.1.0"
+  },
+  "keywords": [
+    "ai", "ai-safety", "ai-governance",
+    "agent", "agents", "llm",
+    "guardrails", "policy", "audit", "compliance",
+    "gdpr", "soc2", "iso27001", "eu-ai-act",
+    "anthropic", "openai", "langchain", "vercel-ai", "mcp"
+  ],
+  "homepage": "https://clevrsecurity.com",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/clevrsecurity/clevr.git",
+    "directory": "sdk"
+  },
+  "bugs": "https://github.com/clevrsecurity/clevr/issues",
+  "engines": { "node": ">=18" },
+  "license": "Apache-2.0",
+  "author": "Clevr Security"
+}

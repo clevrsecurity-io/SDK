@@ -1,0 +1,3 @@
+# Honest language stats: do not count vendored/generated/docs.
+examples/** linguist-documentation
+*.md linguist-documentation

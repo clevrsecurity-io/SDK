@@ -1,0 +1,63 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "clevr-py"
+version = "0.2.0"
+description = "Clevr agent governance SDK for Python — every agent action passes through a policy gate with a tamper-evident audit receipt. Hooks into raw code, LangChain, CrewAI, and Pydantic AI."
+readme = "README.md"
+authors = [{ name = "Clevr Security" }]
+license = { text = "Apache-2.0" }
+requires-python = ">=3.9"
+keywords = [
+  "ai", "ai-safety", "ai-governance",
+  "agent", "agents", "llm",
+  "guardrails", "policy", "audit", "compliance",
+  "gdpr", "soc2", "iso27001", "eu-ai-act",
+  "langchain", "crewai", "pydantic-ai", "mcp"
+]
+classifiers = [
+  "Development Status :: 4 - Beta",
+  "Intended Audience :: Developers",
+  "License :: OSI Approved :: Apache Software License",
+  "Programming Language :: Python :: 3",
+  "Programming Language :: Python :: 3.9",
+  "Programming Language :: Python :: 3.10",
+  "Programming Language :: Python :: 3.11",
+  "Programming Language :: Python :: 3.12",
+  "Topic :: Security",
+  "Topic :: Software Development :: Libraries :: Python Modules",
+]
+# Zero required runtime dependencies — the SDK uses urllib from the standard
+# library so it drops into any environment without conflicts.
+dependencies = []
+
+[project.optional-dependencies]
+langchain        = ["langchain-core>=0.1"]
+crewai           = ["crewai>=0.30"]
+pydantic-ai      = ["pydantic-ai>=0.0.10"]
+autogen          = ["pyautogen>=0.4"]
+llamaindex       = ["llama-index-core>=0.10"]
+bedrock          = ["boto3>=1.34"]
+semantic-kernel  = ["semantic-kernel>=1.0"]
+
+[project.urls]
+Homepage      = "https://clevrsecurity.com"
+Documentation = "https://docs.clevrsecurity.com"
+Source        = "https://github.com/clevrsecurity/clevr"
+Issues        = "https://github.com/clevrsecurity/clevr/issues"
+
+[tool.setuptools]
+# Each module is a single-file at the package root (clevr.py, clevr_*.py)
+# rather than a package directory — simpler to vendor and less import surface.
+py-modules = [
+  "clevr",
+  "clevr_langchain",
+  "clevr_crewai",
+  "clevr_pydantic_ai",
+  "clevr_autogen",
+  "clevr_llamaindex",
+  "clevr_bedrock",
+  "clevr_semantic_kernel",
+]
