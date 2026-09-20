@@ -5,7 +5,8 @@ a policy gate (`allow` / `block` / `step-up`) and is sealed in a
 tamper-evident Ed25519 audit chain.
 
 ```bash
-pip install clevr-py
+# Not on PyPI yet: install from this directory.
+pip install /path/to/clevr/sdk/python
 ```
 
 ## Quick start (raw code)

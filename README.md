@@ -5,7 +5,8 @@ gate (`allow` / `block` / `step-up`) and is sealed in a tamper-evident
 Ed25519 audit chain.
 
 ```bash
-npm install @clevr/sdk
+# Not on the public npm registry yet: install from this directory.
+npm install /path/to/clevr/sdk
 ```
 
 ## Quick start (raw code)

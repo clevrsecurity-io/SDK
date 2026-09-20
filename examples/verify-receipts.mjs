@@ -51,6 +51,12 @@ export function contentHash (payload) {
     ...(payload.on_behalf_of ? { on_behalf_of: payload.on_behalf_of } : {}),
     ...(payload.identity_verified ? { identity_verified: true } : {}),
     ...(payload.input_verified ? { input_verified: true } : {}),
+    // The session this action belongs to. MISSING here until 2026-09-18 while the
+    // signer included it, so every receipt carrying one — 88% of them — verified
+    // as TAMPERED in this, the tool an auditor runs. Position matters as much as
+    // presence: JSON.stringify keeps insertion order, so this must sit exactly
+    // where lib/crypto.js puts it, between input_verified and seq.
+    ...(payload.session_id ? { session_id: payload.session_id } : {}),
     seq: 0,
     action_type: payload.action_type,
     action: payload.action,
@@ -61,6 +67,32 @@ export function contentHash (payload) {
     ...(payload.tool ? { tool: payload.tool } : {}),
     ...(payload.target ? { target: payload.target } : {}),
     ...(payload.environment ? { environment: payload.environment } : {}),
+    // A digest of the exact request the engine judged. The signer has bound it
+    // since it was introduced; this verifier never learned it, so EVERY receipt
+    // carrying one — which on a live tenant is nearly all of them — reported as
+    // TAMPERED here while the server verified the same row fine. Found by
+    // running the documented procedure end to end on 16,267 real decisions:
+    // "verified: 0 / 16267".
+    ...(payload.request_digest ? { request_digest: payload.request_digest } : {}),
+    // Resolution / approver identity, GATED on bind_v exactly as the signer
+    // gates it: rows sealed before the hardened binding carry no bind_v, so
+    // their approver fields stay OUT of the hash and keep verifying. Same keys,
+    // same order, same conditional as lib/crypto.js::contentHash.
+    ...(payload.bind_v ? {
+      bind_v: Number(payload.bind_v),
+      ...(payload.kind ? { kind: payload.kind } : {}),
+      ...(payload.original_decision_id ? { original_decision_id: payload.original_decision_id } : {}),
+      ...(payload.actor ? { actor: payload.actor } : {}),
+      ...(payload.actor_user_id ? { actor_user_id: payload.actor_user_id } : {}),
+      ...(payload.actor_authenticated != null ? { actor_authenticated: !!payload.actor_authenticated } : {}),
+      ...(payload.sod_enforced != null ? { sod_enforced: !!payload.sod_enforced } : {}),
+      ...(payload.validator_user_id ? { validator_user_id: payload.validator_user_id } : {}),
+      ...(payload.justification ? { justification: payload.justification } : {}),
+      ...(payload.grant_id ? { grant_id: payload.grant_id } : {}),
+      ...(payload.operator ? { operator: payload.operator } : {}),
+      ...(payload.approver ? { approver: payload.approver } : {}),
+      ...(payload.requested_by ? { requested_by: payload.requested_by } : {}),
+    } : {}),
     created_at: ts
   })
   return sha256(canonical)
