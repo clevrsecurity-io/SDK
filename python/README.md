@@ -105,6 +105,21 @@ investigator = root.child("investigator")
 investigator.guard({...}, run=lambda _v: investigate(...))
 ```
 
+## Platform
+
+Every decision records the platform the agent runs on, so the console says
+where an action came from. Each adapter names its own framework: `langchain`,
+`crewai`, `autogen`, `llamaindex`, `pydantic-ai` or `bedrock`. When the agent
+runs on something the adapter cannot see, name it once on the client:
+
+```python
+clevr = Clevr(agent="planner", runtime="langgraph")  # or CLEVR_RUNTIME=langgraph
+```
+
+The client's value wins over the adapter's, and a sub-agent made with
+`child()` keeps it. The platform is recorded, never judged: no verdict
+depends on it.
+
 ## Modes
 
 | Mode | What happens |

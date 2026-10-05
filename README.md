@@ -76,6 +76,21 @@ await investigator.guard({...}, async () => {...});
 The chain is verified hop-by-hop by the engine: an investigator agent
 cannot take an action its parent isn't authorized for.
 
+## Platform
+
+Every decision records the platform the agent runs on, so the console says
+where an action came from. Each adapter names its own framework: `langchain`,
+`vercel-ai`, `claude-agent-sdk`, `anthropic-sdk` or `openai-sdk`. When the agent
+runs on something the adapter cannot see, name it once on the client:
+
+```js
+const clevr = new Clevr({ agent: 'planner', runtime: 'langgraph' }); // or CLEVR_RUNTIME=langgraph
+```
+
+The client's value wins over the adapter's, and a sub-agent made with
+`child()` keeps it. The platform is recorded, never judged: no verdict
+depends on it.
+
 ## Modes
 
 | Mode | What happens |

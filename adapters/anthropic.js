@@ -79,6 +79,9 @@ export function withClevr(anthropic, clevr) {
             const target = typeof meta.target === 'function' ? meta.target(tu.input) : meta.target;
             const action = {
               tool: tu.name,
+              // The platform: an agent built on the Anthropic SDK, unless the
+              // client says what it runs on.
+              runtime: clevr.runtime || 'anthropic-sdk',
               action_type: meta.action_type || 'tool_call',
               action: `${tu.name}(${JSON.stringify(tu.input).slice(0, 200)})`,
               target: target || null,

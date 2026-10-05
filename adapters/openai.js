@@ -106,6 +106,9 @@ export function withClevr(openai, clevr) {
 
           const action = {
             tool: name,
+            // The platform: an agent built on the OpenAI SDK, unless the client
+            // says what it runs on.
+            runtime: clevr.runtime || 'openai-sdk',
             action_type: meta.action_type || 'tool_call',
             action: `${name}(${JSON.stringify(parsedArgs).slice(0, 200)})`,
             target: target || null,

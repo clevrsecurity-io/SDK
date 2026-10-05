@@ -1,45 +1,51 @@
-# Example Clevr policy document — "policy as code" format.
+# Example Clevr capability file, the "policy as code" format.
 #
-# Push it to your engine with:
-#   CLEVR_URL=http://localhost:8787 CLEVR_API_KEY=clevr_sk_... \
+# Push it with a console session token, an administrator's since this file
+# permits tools (the agent key, clevr_sk_..., is refused):
+#   CLEVR_URL=https://your-engine.example.com CLEVR_API_KEY=<session token> \
 #     npx @clevr/sdk policy push clevr.yaml
 #
 # Verdicts:
-#   permit  — let the action through (Clevr internal: allow)
-#   defer   — require human approval (Clevr internal: escalate / step-up)
-#   deny    — block (Clevr internal: block)
+#   permit  let the action through (Clevr internal: allow)
+#   defer   hold it for a person (Clevr internal: escalate)
+#   deny    block it (Clevr internal: block)
 #
-# Rules are evaluated top-to-bottom; the first match wins.
-# If no rule matches, the `default` verdict applies.
+# Rules are read top to bottom and the first match decides. A tool no rule
+# names gets the `default`, and only defer acts there: those tools are held
+# for a person, or judged by the Guardian Agent when the reasoning tier is on.
+# With deny, permit or no default, the rest of the engine decides them.
+#
+# A hold never lifts a block. The verb floor blocks a tool that sends to an
+# address or a URL unless the agent's mandate names it or a permit covers it,
+# so the external-email hold below holds only when the agent's mandate names
+# email.send; without it, external email is blocked.
+#
+# Rate and spend limits do not go in this file: the engine stores rate_limits
+# and budget sections but does not enforce them. Limit how often a tool runs
+# with a cap in a policy's Rate limits & quotas.
 
 version: 1
 agent:   acme-support-bot
-default: deny
+default: defer
 
 rules:
-  # Knowledge base — read-only is always fine
+  # Knowledge base: reading is always fine
   - permit: kb.search
   - permit: kb.read
 
-  # Ticket workflow — agents can create + comment, not close
+  # Ticket workflow: agents create and comment, a person signs off on closing
   - permit: ticket.create
   - permit: ticket.comment
   - defer:  ticket.close
     description: A human signs off before tickets close
 
-  # Email — only inside the org; external goes to human review
+  # Email: inside acme.com it goes out, anything else waits for a person.
+  # target.domain is what follows the @, so the condition names acme.com.
   - permit: email.send
-    if:     target.domain == "@acme.com"
+    if:     target.domain == "acme.com"
   - defer:  email.send
     description: External email needs a human approver
 
   # Anything destructive is denied outright
   - deny:   delete.*
   - deny:   drop.*
-
-rate_limits:
-  email.send:    { max: 50,  per: hour }
-  ticket.create: { max: 200, per: day  }
-
-budget:
-  daily: { max_eur: 20, on_exceed: defer }

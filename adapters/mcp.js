@@ -41,6 +41,9 @@ export function wrapMcpHandler(originalHandler, { clevr, mcpAgentId = 'mcp-gatew
     const scoped = new Clevr({
       base: clevr.base, apiKey: clevr.apiKey, fetch: clevr.fetch,
       agent: mcpAgentId, mode: clevr.mode || 'enforce',
+      // The platform the server's own client names; an MCP server cannot see
+      // which application called the tool, so it names none of its own.
+      runtime: clevr.runtime || null,
       sessionId: req.session?.id || null,
       actorChain,
     });

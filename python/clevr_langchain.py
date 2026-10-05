@@ -65,6 +65,9 @@ def guarded(clevr: Clevr, tool_name: str, action_type: str = "tool_call",
                     target = None
             action = {
                 "tool": tool_name,
+                # The platform, unless the client names one (a LangGraph agent
+                # sets runtime="langgraph" on its client: this adapter cannot tell).
+                "runtime": getattr(clevr, "runtime", None) or "langchain",
                 "action_type": action_type,
                 "action": f"{tool_name}({_short(kwargs)})",
                 "target": target,
@@ -97,6 +100,7 @@ class ClevrCallbackHandler:
         tool_name = (serialized or {}).get("name") or "unknown_tool"
         verdict = self.clevr.evaluate({
             "tool": tool_name,
+            "runtime": getattr(self.clevr, "runtime", None) or "langchain",
             "action_type": self.action_type,
             "action": f"{tool_name}({_truncate(input_str, 200)})",
             "metadata": {"input": _truncate(input_str, 500)},

@@ -46,6 +46,7 @@ export function guardToolHandler(clevr, originalHandler, toolMeta = {}) {
     try {
       return await clevr.guard({
         tool: name,
+        runtime: clevr.runtime || 'claude-agent-sdk',   // the platform, unless the client names one
         action_type: meta.action_type || 'tool_call',
         action: `${name}(${safeJson(input)})`,
         target: target || null,

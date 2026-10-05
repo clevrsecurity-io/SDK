@@ -39,6 +39,9 @@ export function guard(clevr, tool, meta = {}) {
     try {
       return await clevr.guard({
         tool: name,
+        // The platform, unless the client names one (a LangGraph agent sets
+        // runtime: 'langgraph' on its client: this adapter cannot tell).
+        runtime: clevr.runtime || 'langchain',
         action_type: meta.action_type || 'tool_call',
         action: `${name}(${safeJson(args)})`,
         target: target || null,
@@ -116,6 +119,7 @@ export class ClevrCallbackHandler {
     }
     const verdict = await this.clevr.evaluate({
       tool: 'llm.messages',
+      runtime: this.clevr.runtime || 'langchain',
       action_type: 'chat',
       action: conversation.map((m) => m.content).join('\n'),
       conversation,

@@ -31,7 +31,10 @@
 //   toAction(req)  → partial action merged over the defaults (tool/target/action/metadata)
 //   actionType     → force the action_type; otherwise GET/HEAD → 'read', else 'write'
 //   onEscalate     → 'block' (403, default) | 'allow' (call next())
-//   failClosed     → engine error: false = fail-open/next() (default), true = 503
+//   failClosed     → on an engine error: true = 503, false = fail-open/next().
+//                    Default follows the client's intent: fail closed when the
+//                    Clevr client mode is 'enforce', fail open when 'shadow'.
+//                    Set it explicitly to override.
 //
 // This is the GUARD path for an HTTP surface. It calls clevr.evaluate() (not
 // guard()) because next() is the continuation — there is no inner function to
@@ -43,8 +46,15 @@ export function clevrGate (clevr, opts = {}) {
     toAction,
     actionType,
     onEscalate = 'block',
-    failClosed = false,
   } = opts
+  // Fail policy on an engine error. Default follows the client's enforcement
+  // intent: an `enforce` client asked for governance, so a brain outage refuses
+  // (503) rather than silently serving the route ungoverned; a `shadow` client
+  // is not enforcing anyway, so it proceeds. This aligns the HTTP gate with every
+  // other SDK surface (guard(), the model-loop and tool adapters all fail closed
+  // on an engine error) and with the platform's fail-closed floor. An explicit
+  // failClosed always wins, so availability-first teams keep opting out.
+  const failClosed = opts.failClosed ?? (clevr.mode === 'enforce')
 
   const verbFor = (m) => (m === 'GET' || m === 'HEAD' || m === 'OPTIONS' ? 'read' : 'write')
 

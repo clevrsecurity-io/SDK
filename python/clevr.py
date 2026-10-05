@@ -64,6 +64,11 @@ class Clevr:
         session_goal: Optional human-readable goal text (sealed on first decision).
         actor_chain:  Optional pre-built chain (root-first list of hops).
         timeout:      HTTP timeout in seconds (default 10).
+        runtime:      The platform the agent runs on (langgraph, crewai, n8n...),
+                      recorded on every decision so the console says where an
+                      action came from. Env CLEVR_RUNTIME. Each adapter names
+                      its own framework when this is unset. Recorded, never
+                      judged: no verdict depends on it.
     """
 
     def __init__(
@@ -78,12 +83,14 @@ class Clevr:
         actor_chain: Optional[list[dict]] = None,
         timeout: float = 10.0,
         identity_seed: Optional[str] = None,
+        runtime: Optional[str] = None,
     ) -> None:
         self.base = (base or os.environ.get("CLEVR_URL") or "http://localhost:8787").rstrip("/")
         self.api_key = api_key or os.environ.get("CLEVR_API_KEY")
         if not self.api_key:
             raise ValueError("Clevr SDK: api_key is required (or set CLEVR_API_KEY).")
         self.agent = agent
+        self.runtime = runtime or os.environ.get("CLEVR_RUNTIME") or None
         if mode not in ("enforce", "shadow"):
             raise ValueError(f"Clevr SDK: mode must be 'enforce' or 'shadow' (got {mode!r})")
         self.mode = mode
@@ -134,7 +141,7 @@ class Clevr:
             mode=self.mode, on_escalate=self.on_escalate,
             session_id=self.session_id, session_goal=self.session_goal,
             actor_chain=new_chain, timeout=self.timeout,
-            identity_seed=self.identity_seed,
+            identity_seed=self.identity_seed, runtime=self.runtime,
         )
 
     # ─── Core verbs ──────────────────────────────────────────────────────
@@ -145,6 +152,8 @@ class Clevr:
             "agent": self.agent,
             "session_id": self.session_id,
             "session_goal": self.session_goal,
+            # The action's own runtime, when it names one, wins (it comes after).
+            **({"runtime": self.runtime} if self.runtime else {}),
             **action,
         }
         if self.actor_chain:

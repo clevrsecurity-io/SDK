@@ -72,6 +72,7 @@ def guard(
                 target = None
         action = {
             "tool": name,
+            "runtime": getattr(clevr, "runtime", None) or "llamaindex",   # the platform, unless the client names one
             "action_type": action_type,
             "action": f"{name}({_short(kwargs)})",
             "target": target,

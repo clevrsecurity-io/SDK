@@ -64,6 +64,7 @@ def guarded(
                     target = None
             return {
                 "tool": name,
+                "runtime": getattr(clevr, "runtime", None) or "pydantic-ai",   # the platform, unless the client names one
                 "action_type": action_type,
                 "action": f"{name}({_short(kwargs)})",
                 "target": target,

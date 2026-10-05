@@ -50,6 +50,12 @@ export class Clevr {
     this.apiKey = opts.apiKey || process.env.CLEVR_API_KEY;
     if (!this.apiKey) throw new Error('Clevr SDK: apiKey is required (or set CLEVR_API_KEY).');
     this.agent = opts.agent || 'unnamed-agent';
+    // The platform the agent runs on (langgraph, crewai, n8n...), recorded on
+    // every decision so the console says where an action came from. Each
+    // adapter names its own framework when this is unset; set it when the
+    // agent runs on something the adapter cannot see (LangGraph over the
+    // LangChain adapter, say). Recorded, never judged: no verdict depends on it.
+    this.runtime = opts.runtime || process.env.CLEVR_RUNTIME || null;
     this.onEscalate = opts.onEscalate || 'throw'; // 'throw' | 'wait' | 'allow'
     this.fetch = opts.fetch || globalThis.fetch;
     this.sessionId = opts.sessionId || null;
@@ -117,7 +123,7 @@ export class Clevr {
     ];
     return new Clevr({
       base: this.base, apiKey: this.apiKey, fetch: this.fetch,
-      agent: childAgentId,
+      agent: childAgentId, runtime: this.runtime,
       mode: this.mode, onEscalate: this.onEscalate,
       sessionId: this.sessionId, sessionGoal: this.sessionGoal,
       actorChain: newChain,
@@ -174,6 +180,8 @@ export class Clevr {
       // Phase 1 — pass the actor chain so the engine can verify authority
       // hop-by-hop and the audit log records the full lineage.
       ...(this.actorChain ? { actor_chain: this.actorChain } : {}),
+      // The action's own runtime, when it names one, wins (it comes after).
+      ...(this.runtime ? { runtime: this.runtime } : {}),
       ...action,
     };
     // Surface tool-call arguments as target_attr so the engine's deterministic
@@ -224,10 +232,19 @@ export class Clevr {
   async #waitThenRun(verdict, run, timeoutMs = 10 * 60_000) {
     const start = Date.now();
     let delay = 1000;
-    while (Date.now() - start < timeoutMs) {
+    let deadline = start + timeoutMs;
+    while (Date.now() < deadline) {
       await new Promise((r) => setTimeout(r, delay));
       delay = Math.min(delay * 1.5, 15_000);
       const status = await this.#getDecision(verdict.decision_id);
+      // The wait ends when the decision ends. The workspace sets how long a held
+      // action may wait before it is declined on its own, the decision carries
+      // that deadline, and this reads it: a ten minute constant meant a tenant
+      // allowing thirty had agents giving up at ten while the console said
+      // otherwise. Five seconds past it, so the sweep wins the race and the
+      // agent reads the real answer instead of a timeout.
+      const ends = status?.expires_at ? Date.parse(status.expires_at) : NaN;
+      if (Number.isFinite(ends)) deadline = ends + 5_000;
       // The engine resolves a step-up by writing 'approved' / 'rejected' on
       // the decision (override route + server-side expiry sweep). We also
       // accept the raw override effects 'allow' / 'block' defensively so a
@@ -238,7 +255,7 @@ export class Clevr {
         throw new ClevrBlockedError({ ...verdict, reason: `Rejected by ${status.resolved_by}: ${status.resolution_reason}` });
       }
     }
-    throw new ClevrEscalatedError({ ...verdict, reason: `Escalation timed out after ${Math.round(timeoutMs / 1000)}s.` });
+    throw new ClevrEscalatedError({ ...verdict, reason: `Escalation timed out after ${Math.round((Date.now() - start) / 1000)}s.` });
   }
 
   async #getDecision(decisionId) {
@@ -303,11 +320,13 @@ export function wrapModel(client, clevr, opts = {}) {
     }
     return typeof args.prompt === 'string' ? args.prompt : '';
   };
-  const guardCreate = (realCreate) => (args = {}) => {
+  // Which SDK the wrapped client is, read from the method it was called by:
+  // messages.create is Anthropic's, chat.completions.create OpenAI's.
+  const guardCreate = (realCreate, framework) => (args = {}) => {
     const msgs = Array.isArray(args.messages) ? args.messages
                : Array.isArray(args.input) ? args.input : null;
     return clevr.guard(
-      { tool, action_type: 'chat',
+      { tool, action_type: 'chat', runtime: clevr.runtime || framework,
         action: String(promptText(args)).slice(0, 8000),
         conversation: msgs && msgs.length ? msgs : undefined,
         metadata: { model: args.model } },
@@ -318,7 +337,7 @@ export function wrapModel(client, clevr, opts = {}) {
     get(target, prop, recv) {
       if (prop === 'messages' && target.messages?.create) {
         return new Proxy(target.messages, {
-          get(m, p) { return p === 'create' ? guardCreate(m.create.bind(m)) : Reflect.get(m, p); }
+          get(m, p) { return p === 'create' ? guardCreate(m.create.bind(m), 'anthropic-sdk') : Reflect.get(m, p); }
         });
       }
       if (prop === 'chat' && target.chat?.completions?.create) {
@@ -326,7 +345,7 @@ export function wrapModel(client, clevr, opts = {}) {
           get(c, p) {
             if (p !== 'completions') return Reflect.get(c, p);
             return new Proxy(c.completions, {
-              get(cc, pp) { return pp === 'create' ? guardCreate(cc.create.bind(cc)) : Reflect.get(cc, pp); }
+              get(cc, pp) { return pp === 'create' ? guardCreate(cc.create.bind(cc), 'openai-sdk') : Reflect.get(cc, pp); }
             });
           }
         });

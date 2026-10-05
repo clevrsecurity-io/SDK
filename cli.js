@@ -43,13 +43,13 @@ if (cmd === 'policy') {
     if (sub === 'lint') {
       console.log('✓ Valid policy document.')
       console.log(`  Agent:        ${doc.agent}`)
-      console.log(`  Default:      ${doc.default || 'deny'}`)
+      console.log(`  Default:      ${doc.default || 'none'}`)
       console.log(`  Rules:        ${(doc.rules || []).length}`)
-      console.log(`  Rate limits:  ${Object.keys(doc.rate_limits || {}).length}`)
-      console.log(`  Budgets:      ${Object.keys(doc.budget || {}).length}`)
+      // lint never reaches the engine, so it says itself what a push is told.
+      for (const n of [...defaultNotes(doc), ...limitNotes(doc)]) console.log(`  Note: ${n}`)
       process.exit(0)
     }
-    if (!KEY) die('CLEVR_API_KEY is required to push (set in env).')
+    if (!KEY) die('CLEVR_API_KEY is required to push: set it to a console session token.')
     await push(doc)
     process.exit(0)
   }
@@ -87,9 +87,27 @@ async function push (doc) {
   if (!r.ok) die(`Push failed (${r.status}): ${JSON.stringify(body)}`)
   console.log(`✓ Pushed policy ${body.policy?.name} (${body.policy?.id})`)
   console.log(`  Rules:       ${body.summary?.rules}`)
-  console.log(`  Rate limits: ${body.summary?.rate_limits}`)
-  console.log(`  Budgets:     ${body.summary?.budgets}`)
-  console.log(`  Default:     ${body.summary?.default}`)
+  console.log(`  Default:     ${doc.default || 'none'}`)
+  // The engine's own warning when it sent one; an engine too old to send it
+  // still stored the limits without enforcing them, so say it from here.
+  for (const n of [...defaultNotes(doc), ...(body.warnings ?? limitNotes(doc))]) console.log(`  Note: ${n}`)
+}
+
+// The capability walker acts on one default only: defer holds the tools no rule
+// names (or hands them to the Guardian Agent). A default of deny or permit is
+// skipped by design (engine.js walkCapabilityRules), so a file that sets one is
+// told it does nothing rather than left to believe it blocks or allows.
+function defaultNotes (doc) {
+  const d = doc.default
+  if (!d || d === 'defer' || d === 'escalate') return []
+  return [`default: ${d} has no effect. Only defer acts on the tools no rule names; otherwise the rest of the engine decides them.`]
+}
+
+// Mirrors the warning POST /brain/api/policies/import returns, for lint.
+function limitNotes (doc) {
+  const count = (k) => Object.keys(doc[k] || {}).length
+  if (!count('rate_limits') && !count('budget')) return []
+  return ["rate_limits and budget are stored with the policy but not enforced. To limit how often a tool runs, give a policy a condition that names it and add a cap in that policy's Rate limits & quotas. A spending budget has no equivalent: the engine only knows a cost the caller sends with a check, and neither the SDK, the plugins nor the gateway sends one."]
 }
 
 async function verify (decId) {
@@ -119,7 +137,22 @@ function validate (doc) {
       die(`Rule must have verdict in ${[...VERDICTS].join('|')}: ${JSON.stringify(r)}`)
     if (!r.tool && !r.action_type)
       die(`Rule must have at least one of {tool, action_type}: ${JSON.stringify(r)}`)
+    const listed = toolListRefusal(r.tool)
+    if (listed) die(`${listed} Rule: ${JSON.stringify(r)}`)
   }
+}
+
+// A rule names one tool. The engine reads "notes.read, notes.write" as one name,
+// which no tool has, so the import route refuses such a rule; lint says so
+// first, in the route's words (brain/src/lib/capability_tool.js).
+function toolListRefusal (pattern) {
+  if (typeof pattern !== 'string' || !pattern.includes(',')) return null
+  const tools = pattern.split(',').map((t) => t.trim()).filter(Boolean)
+  const plain = tools.length > 0 && tools.every((t) => !/[\s{}]/.test(t))
+  const fix = !plain ? 'Write one rule per tool.'
+    : tools.length === 1 ? `Write it as \`${tools[0]}\`.`
+      : `Write one rule per tool: ${tools.map((t) => `\`${t}\``).join(', ')}.`
+  return `A rule names one tool. \`${pattern}\` is read as a single name, which no tool has, so the rule would never apply. ${fix}`
 }
 
 function printHelp () {
@@ -134,23 +167,21 @@ Usage:
 
 Environment:
   CLEVR_URL       Engine base URL  (default http://localhost:8787)
-  CLEVR_API_KEY   Bearer key (required for push and for online verify;
-                  NOT needed for offline bundle verification)
+  CLEVR_API_KEY   For push: a console session token, an administrator's when
+                  the file permits a tool (the agent key is refused).
+                  For online verify: the workspace API key.
+                  Not needed for lint or offline bundle verification.
 
 Example clevr.yaml:
   version: 1
   agent:   support-bot
-  default: deny
+  default: defer                  # tools no rule names are held
   rules:
     - permit: kb.search
     - permit: ticket.update
-    - defer:  email.send
-      if:    target.domain != "@acme.com"
-    - deny:  delete.*
-  rate_limits:
-    email.send: { max: 50, per: hour }
-  budget:
-    daily: { max_eur: 20, on_exceed: defer }
+    - defer:  email.send          # mail outside acme.com (no @)
+      if:     target.domain != "acme.com"
+    - deny:   delete.*
 `)
 }
 

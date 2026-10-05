@@ -93,6 +93,17 @@ export function contentHash (payload) {
       ...(payload.approver ? { approver: payload.approver } : {}),
       ...(payload.requested_by ? { requested_by: payload.requested_by } : {}),
     } : {}),
+    // Receipt-hash v1+: the observe-mode verdict (would_have_been) and the audit
+    // coordinates (tier, request_id), GATED on hash_v exactly as the signer gates
+    // them — rows sealed before this carry no hash_v, so these keys stay OUT of the
+    // hash and keep verifying. Same keys, same order, same conditional as
+    // lib/crypto.js::contentHash.
+    ...(payload.hash_v ? {
+      hash_v: Number(payload.hash_v),
+      ...(payload.would_have_been ? { would_have_been: payload.would_have_been } : {}),
+      ...(payload.tier != null ? { tier: Number(payload.tier) } : {}),
+      ...(payload.request_id ? { request_id: payload.request_id } : {}),
+    } : {}),
     created_at: ts
   })
   return sha256(canonical)

@@ -59,6 +59,7 @@ def wrap_lambda_handler(
 
         action = {
             "tool": f"{action_group}.{fn_name}",
+            "runtime": getattr(clevr, "runtime", None) or "bedrock",   # the platform, unless the client names one
             "action_type": action_type,
             "action": f"{fn_name}({_short(params)})",
             "target": params.get("target") or params.get("path") or params.get("url"),
@@ -90,6 +91,7 @@ def guard(
     def gated(**kwargs: Any) -> Any:
         action = {
             "tool": name,
+            "runtime": getattr(clevr, "runtime", None) or "bedrock",
             "action_type": action_type,
             "action": f"{name}({_short(kwargs)})",
             "metadata": {"kwargs": _short(kwargs)},

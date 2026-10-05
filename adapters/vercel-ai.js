@@ -81,6 +81,7 @@ export function guardedTool(clevr, name, tool, meta = {}) {
       try {
         const r = await clevr.guard({
           tool: name,
+          runtime: clevr.runtime || 'vercel-ai',   // the platform, unless the client names one
           action_type: meta.action_type || 'tool_call',
           action: `${name}(${safeJson(args)})`,
           target: target || null,
@@ -136,6 +137,7 @@ export function guardGenerate(clevr, generateFn, opts = {}) {
         : (typeof args.system === 'string' ? args.system : ''));
     const verdict = await clevr.evaluate({
       tool,
+      runtime: clevr.runtime || 'vercel-ai',
       action_type: 'chat',
       action: text,
       conversation: convo || (text ? [{ role: 'user', content: text }] : null),
