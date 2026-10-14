@@ -1,5 +1,6 @@
 #!/usr/bin/env node
-// @clevr/sdk CLI — `npx @clevr/sdk <command>`
+// The SDK's command line: `node sdk/cli.js <command>` from the source tree. Not
+// published yet, and never as @clevr/sdk: that npm scope belongs to another company.
 //
 // Commands:
 //   policy push <file.yaml|file.json>   Upload a Clevr policy doc

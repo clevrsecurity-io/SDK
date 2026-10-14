@@ -17,6 +17,8 @@
 //
 // It mirrors brain/src/lib/crypto.js exactly:
 //   content_hash  = sha256( canonicalJSON(receipt_payload, seq:0) )
+//                   hash_v >= 2: the whole payload, keys sorted at every depth;
+//                   before that, the listed fields in their fixed order
 //   receipt_hash  = sha256( prev_hash + content_hash )
 //   signature     = Ed25519( receipt_hash )  verified with the org public key
 //   chain         : decision[i].prev_hash === decision[i-1].receipt_hash
@@ -36,11 +38,24 @@ export function publicKeyFromB64 (b64) {
   return crypto.createPublicKey({ key: spki, format: 'der', type: 'spki' })
 }
 
+// JSON with object keys sorted at every depth, as lib/crypto.js::canonicalJson:
+// the database does not keep the order keys were written in.
+export function canonicalJson (v) {
+  if (v && typeof v.toJSON === 'function') v = v.toJSON()
+  if (v === null || typeof v !== 'object') return JSON.stringify(v) ?? 'null'
+  const absent = (x) => x === undefined || typeof x === 'function' || typeof x === 'symbol'
+  if (Array.isArray(v)) return '[' + v.map((x) => (absent(x) ? 'null' : canonicalJson(x))).join(',') + ']'
+  const keys = Object.keys(v).filter((k) => !absent(v[k])).sort()
+  return '{' + keys.map((k) => JSON.stringify(k) + ':' + canonicalJson(v[k])).join(',') + '}'
+}
+
 // Canonical content hash — identical field set + order to lib/crypto.js::contentHash,
 // computed over the receipt_payload with seq forced to 0. JSON.stringify omits
-// undefined-valued keys, exactly as the signer did.
+// undefined-valued keys, exactly as the signer did. From hash_v 2 every key of
+// the payload is signed.
 export function contentHash (payload) {
   const ts = new Date(payload.created_at).toISOString()
+  if (Number(payload.hash_v) >= 2) return sha256(canonicalJson({ ...payload, seq: 0, created_at: ts }))
   const canonical = JSON.stringify({
     org_id: payload.org_id,
     agent_id: payload.agent_id,
@@ -57,6 +72,10 @@ export function contentHash (payload) {
     // presence: JSON.stringify keeps insertion order, so this must sit exactly
     // where lib/crypto.js puts it, between input_verified and seq.
     ...(payload.session_id ? { session_id: payload.session_id } : {}),
+    // A session Clevr issued and its key's thumbprint, right after session_id
+    // as the signer puts them.
+    ...(payload.session_verified ? { session_verified: true } : {}),
+    ...(payload.session_jkt ? { session_jkt: payload.session_jkt } : {}),
     seq: 0,
     action_type: payload.action_type,
     action: payload.action,
@@ -74,6 +93,9 @@ export function contentHash (payload) {
     // running the documented procedure end to end on 16,267 real decisions:
     // "verified: 0 / 16267".
     ...(payload.request_digest ? { request_digest: payload.request_digest } : {}),
+    // The rules in force when the engine judged, right after request_digest as
+    // the signer puts them.
+    ...(Array.isArray(payload.rule_set) && payload.rule_set.length ? { rule_set: payload.rule_set } : {}),
     // Resolution / approver identity, GATED on bind_v exactly as the signer
     // gates it: rows sealed before the hardened binding carry no bind_v, so
     // their approver fields stay OUT of the hash and keep verifying. Same keys,

@@ -12,6 +12,7 @@
   },
   "exports": {
     ".":                  "./index.js",
+    "./enforcement-proof": "./enforcement-proof.js",
     "./anthropic":        "./adapters/anthropic.js",
     "./claude-agent-sdk": "./adapters/claude-agent-sdk.js",
     "./openai":           "./adapters/openai.js",
@@ -22,6 +23,7 @@
   },
   "files": [
     "index.js",
+    "enforcement-proof.js",
     "cli.js",
     "adapters/",
     "examples/",

@@ -80,8 +80,8 @@ export class Clevr {
   }
 
   /**
-   * Start a new session (or attach to one). Returns the session id so callers
-   * can persist it across calls.
+   * Start a new session on this client: one per run of the agent. Every later
+   * call carries it until the next startSession. Returns the session id.
    */
   startSession({ goal } = {}) {
     this.sessionId = 'sess_' + Math.random().toString(36).slice(2, 12);
@@ -163,7 +163,7 @@ export class Clevr {
       throw new ClevrBlockedError(verdict);
     }
     // escalate
-    if (this.onEscalate === 'wait')  return await this.#waitThenRun(verdict, run);
+    if (this.onEscalate === 'wait')  return await this.#waitThenRun(verdict, run, action);
     if (this.onEscalate === 'allow') return await run(verdict);
     throw new ClevrEscalatedError(verdict);
   }
@@ -219,17 +219,53 @@ export class Clevr {
       throw new Error(`Clevr evaluate failed (${r.status}): ${text}`);
     }
     const v = await r.json();
-    // Auto-track session and delegation context for the next hop.
-    if (!this.sessionId && v.session_id) this.sessionId = v.session_id;
+    // Delegation context for the next hop. A session the engine opened is not
+    // taken over: kept on a long-lived client, it would make every later run
+    // one endless session.
     if (v.request_id) this.lastRequestId = v.request_id;
     return v;
+  }
+
+  /**
+   * Ask to pay with this agent's card (POST /v1/card/spend). The payment is
+   * judged like any action; on an allow Clevr opens a one-time permit, and the
+   * next purchase on the card that fits it is approved when the card network
+   * asks. The card number is never part of this exchange.
+   *
+   *   const p = await clevr.requestCardPayment({ amount: '49.00', currency: 'EUR', merchant: 'Acme', reason: 'licence' })
+   *   if (p.granted) { ...pay before p.permit.expires_at... }
+   *   else if (p.resume) { ...once a person approved: requestCardPayment({ ...same, resume: p.resume }) }
+   *
+   * Returns the brain's answer with `status` (200 granted, 202 held, 403 refused,
+   * 409 allowed but no permit could be opened). Throws on transport and input errors.
+   */
+  async requestCardPayment({ amount, currency, merchant, reason, resume, ttlSeconds } = {}) {
+    const r = await this.fetch(`${this.base}/v1/card/spend`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${this.apiKey}` },
+      body: JSON.stringify({
+        agent_id: this.agent, session_id: this.sessionId,
+        amount, currency, merchant, reason,
+        ...(resume ? { resume } : {}),
+        ...(ttlSeconds ? { ttl_seconds: ttlSeconds } : {}),
+      }),
+    });
+    let body = {};
+    try { body = await r.json(); } catch { body = {}; }
+    if (![200, 202, 403, 409].includes(r.status)) {
+      throw new Error(`Clevr card payment request failed (${r.status}): ${body.message || body.error || 'no answer'}`);
+    }
+    return { status: r.status, ...body };
   }
 
   /**
    * Poll the engine for resolution of an escalated decision. Backoff up to
    * `timeoutMs` (default 10 min). When resolved=approved → runs the inner fn.
    */
-  async #waitThenRun(verdict, run, timeoutMs = 10 * 60_000) {
+  async #waitThenRun(verdict, run, action, timeoutMs = 10 * 60_000) {
+    // The same action already waits for a person (held_as): this attempt is
+    // settled with that request and never runs on its own, so it does not wait.
+    if (verdict.held_as) throw new ClevrEscalatedError(verdict);
     const start = Date.now();
     let delay = 1000;
     let deadline = start + timeoutMs;
@@ -250,12 +286,34 @@ export class Clevr {
       // accept the raw override effects 'allow' / 'block' defensively so a
       // direct effect write still unblocks the agent.
       const res = status?.resolution;
-      if (res === 'approved' || res === 'allow') return await run(verdict);
+      // Approved: the action runs on the approval, spent by asking again with
+      // it, as every other door does. Run on the poll alone, it was never spent:
+      // the operation read "approved, not used" for an action that had run.
+      if (res === 'approved' || res === 'allow') return await this.#spendThenRun(verdict, run, action);
       if (res === 'rejected' || res === 'block') {
         throw new ClevrBlockedError({ ...verdict, reason: `Rejected by ${status.resolved_by}: ${status.resolution_reason}` });
       }
     }
     throw new ClevrEscalatedError({ ...verdict, reason: `Escalation timed out after ${Math.round((Date.now() - start) / 1000)}s.` });
+  }
+
+  /**
+   * Wait for a person to decide a held verdict, as guard() does with onEscalate
+   * 'wait', for an adapter that does not run the action itself (a callback
+   * handler). Resolves with the verdict that spent the approval; throws
+   * ClevrBlockedError on a rejection and ClevrEscalatedError on a timeout or a
+   * hold the same action already waits on (held_as).
+   */
+  async waitForDecision(verdict, action) {
+    return await this.#waitThenRun(verdict, (spent) => spent, action);
+  }
+
+  async #spendThenRun(verdict, run, action) {
+    const spent = await this.evaluate({ ...action, resume: verdict.decision_id });
+    this.lastVerdict = spent;
+    if (spent.effect === 'allow') return await run(spent);
+    if (spent.effect === 'block') throw new ClevrBlockedError(spent);
+    throw new ClevrEscalatedError(spent);
   }
 
   async #getDecision(decisionId) {
@@ -290,6 +348,14 @@ export const chain = {
   },
 };
 
+// The name a prompt is recorded under, kept under the model's door `llm.`.
+// A caller's own name outside it had "Pay Acme the 5000" refused as a
+// financial operation (2026-10-14).
+export function modelDoor(name, fallback) {
+  const n = typeof name === 'string' && name.trim() ? name.trim() : fallback;
+  return /^llm\./i.test(n) ? n : `llm.${n}`;
+}
+
 /**
  * Wrap an LLM client so EVERY model call is evaluated by Clevr BEFORE it runs.
  * This is how the SDK transport gets full-session visibility (each prompt is
@@ -306,9 +372,14 @@ export const chain = {
  *   const clevr = new Clevr({ agent: 'researcher' });
  *   const model = wrapModel(new Anthropic(), clevr);
  *   await model.messages.create({ model: 'claude-...', messages: [...] }); // gated
+ *
+ * `opts.tool` names the prompts in the console (default `llm.messages`). It is
+ * kept under the model's door: `{ tool: 'billing' }` records `llm.billing`. The
+ * engine reads a chat as what a person asks the model only under `llm.`; under
+ * any other name, the prompt is judged as the operation that name says.
  */
 export function wrapModel(client, clevr, opts = {}) {
-  const tool = opts.tool || 'llm.messages';
+  const tool = modelDoor(opts.tool, 'llm.messages');
   const promptText = (args = {}) => {
     const msgs = Array.isArray(args.messages) ? args.messages
                : Array.isArray(args.input) ? args.input : [];

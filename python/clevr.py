@@ -24,7 +24,13 @@ package; unsigned clients keep working as 'asserted' with pure stdlib.
 
 from __future__ import annotations
 
+import dataclasses
+import datetime
+import enum
+import inspect
 import json
+import math
+import numbers
 import os
 import time
 import urllib.error
@@ -60,7 +66,9 @@ class Clevr:
                  (records the verdict but always lets the action run).
         on_escalate: 'throw' (default) | 'wait' (polls for resolution) |
                      'allow' (runs anyway — dev only).
-        session_id:   Optional explicit session id (else auto-generated).
+        session_id:   Optional session id sent on every call. Prefer start_session()
+                      at the start of each run. Without one, the engine groups
+                      the agent's calls by silence (a new session after 30 min).
         session_goal: Optional human-readable goal text (sealed on first decision).
         actor_chain:  Optional pre-built chain (root-first list of hops).
         timeout:      HTTP timeout in seconds (default 10).
@@ -112,7 +120,8 @@ class Clevr:
     # ─── Chain helpers ───────────────────────────────────────────────────
 
     def start_session(self, goal: Optional[str] = None) -> str:
-        """Mint a new session_id. Returns it so the caller can persist it."""
+        """Start a new session on this client: one per run of the agent. Every
+        later call carries it until the next start_session. Returns the id."""
         self.session_id = "sess_" + uuid.uuid4().hex[:10]
         if goal is not None:
             self.session_goal = goal
@@ -186,11 +195,41 @@ class Clevr:
                 pass
         verdict = self._post("/v1/evaluate", body)
         self.last_verdict = verdict
-        if not self.session_id and verdict.get("session_id"):
-            self.session_id = verdict["session_id"]
+        # A session the engine opened is not taken over: kept on a long-lived
+        # client, it would make every later run one endless session.
         if verdict.get("request_id"):
             self.last_request_id = verdict["request_id"]
         return verdict
+
+    def request_card_payment(self, amount, currency: str, merchant: Optional[str] = None,
+                             reason: Optional[str] = None, resume: Optional[str] = None) -> dict:
+        """Ask to pay with this agent's card (POST /v1/card/spend).
+
+        Judged like any action. On an allow Clevr opens a one-time permit; the
+        next purchase on the card that fits it is approved when the card network
+        asks. The card number is never part of this exchange. Returns the answer
+        with `status`: 200 granted, 202 held (ask again with resume=decision_id
+        once a person approved), 403 refused, 409 allowed but no permit opened.
+        """
+        body = {"agent_id": self.agent, "session_id": self.session_id,
+                "amount": str(amount), "currency": currency, "merchant": merchant, "reason": reason}
+        if resume:
+            body["resume"] = resume
+        req = urllib.request.Request(
+            f"{self.base}/v1/card/spend", data=json.dumps(body).encode("utf-8"), method="POST",
+            headers={"Content-Type": "application/json", "Authorization": f"Bearer {self.api_key}"},
+        )
+        try:
+            with urllib.request.urlopen(req, timeout=self.timeout) as r:
+                return {"status": r.status, **json.loads(r.read().decode("utf-8"))}
+        except urllib.error.HTTPError as e:
+            text = e.read().decode("utf-8", "ignore")
+            if e.code in (202, 403, 409):
+                try:
+                    return {"status": e.code, **json.loads(text)}
+                except ValueError:
+                    pass
+            raise RuntimeError(f"Clevr /v1/card/spend {e.code}: {text[:200]}")
 
     def guard(self, action: dict, run: Callable[[dict], Any]) -> Any:
         """Wrap a tool execution with the policy gate.
@@ -220,7 +259,7 @@ class Clevr:
         if self.on_escalate == "allow":
             return run(verdict)
         if self.on_escalate == "wait":
-            return self._wait_then_run(verdict, run)
+            return self._wait_then_run(verdict, run, action)
         raise ClevrEscalatedError(verdict)
 
     # ─── Internal ────────────────────────────────────────────────────────
@@ -250,8 +289,12 @@ class Clevr:
         with urllib.request.urlopen(req, timeout=self.timeout) as r:
             return json.loads(r.read().decode("utf-8"))
 
-    def _wait_then_run(self, verdict: dict, run: Callable, timeout_s: float = 600.0) -> Any:
+    def _wait_then_run(self, verdict: dict, run: Callable, action: dict, timeout_s: float = 600.0) -> Any:
         """Poll the decision endpoint until the escalation is resolved by a human."""
+        # The same action already waits for a person (held_as): this attempt is
+        # settled with that request and never runs on its own, so it does not wait.
+        if verdict.get("held_as"):
+            raise ClevrEscalatedError(verdict)
         decision_id = verdict.get("decision_id")
         start = time.time()
         delay = 1.0
@@ -264,13 +307,102 @@ class Clevr:
                 continue
             resolution = (status or {}).get("resolution")
             if resolution == "approved":
-                return run(verdict)
+                # Run on the approval, spent by asking again with it, as every
+                # other door does: run on the poll alone it was never spent.
+                spent = self.evaluate({**action, "resume": decision_id})
+                if spent.get("effect") == "allow":
+                    return run(spent)
+                if spent.get("effect") == "block":
+                    raise ClevrBlockedError(spent)
+                raise ClevrEscalatedError(spent)
             if resolution == "rejected":
                 raise ClevrBlockedError({
                     **verdict,
                     "reason": f"Rejected by {status.get('resolved_by')}: {status.get('resolution_reason')}",
                 })
         raise ClevrEscalatedError({**verdict, "reason": f"Escalation timed out after {int(timeout_s)}s"})
+
+
+# ── The arguments of a tool call, for target_attr ───────────────────
+# A rule on an argument (target.amount > 1000) reads target_attr, and until
+# 2026-10-14 no adapter filled it: each sent its arguments as a 200-character
+# JSON string under metadata, which evaluate() does not promote, so on every
+# Python framework door such a rule never fired.
+
+_SKIPPED = object()
+# Deep enough for any real argument, well inside the engine's 64-level cap on a
+# body (a deeper one is refused with a 400 and the tool would fail).
+_MAX_ARG_DEPTH = 24
+# What a framework hands a tool alongside the model's arguments: the run itself,
+# not the call. A Kernel would dump every plugin and service it holds.
+_INJECTED = frozenset({"RunContext", "Kernel"})
+
+
+def tool_args(fn: Any, args: tuple = (), kwargs: Optional[dict] = None) -> Optional[dict]:
+    """The arguments of one tool call by parameter name, as JSON values.
+
+    Positional arguments are named from fn's signature, so pay("acme", 5000)
+    reads like pay(vendor="acme", amount=5000). A value no rule can read (an
+    object, `self`, the framework's run context) is left out. None when no
+    argument is left.
+    """
+    named: dict = dict(kwargs or {})
+    if args:
+        named["_args"] = list(args)
+    if fn is not None:
+        try:
+            bound = inspect.signature(fn).bind_partial(*args, **(kwargs or {}))
+        except (TypeError, ValueError):
+            bound = None
+        if bound is not None:
+            named = {}
+            for name, value in bound.arguments.items():
+                kind = bound.signature.parameters[name].kind
+                if kind is inspect.Parameter.VAR_KEYWORD:
+                    named.update(value)
+                elif name not in ("self", "cls"):
+                    named[name] = list(value) if kind is inspect.Parameter.VAR_POSITIONAL else value
+    out = _plain(named, 0)
+    return out or None
+
+
+def _plain(v: Any, depth: int) -> Any:
+    if v is None or isinstance(v, (bool, str)):
+        return v
+    if isinstance(v, int):
+        return int(v)
+    if isinstance(v, numbers.Number):
+        # Decimal, numpy scalars. NaN and infinity are not JSON (the engine would
+        # refuse the body): sent as words, an amount rule reads them as unreadable
+        # and a hold still applies.
+        try:
+            f = float(v)
+        except (TypeError, ValueError):
+            return str(v)
+        return f if math.isfinite(f) else str(v)
+    if isinstance(v, enum.Enum):
+        return _plain(v.value, depth)
+    if isinstance(v, (datetime.date, datetime.time, uuid.UUID)):
+        return v.isoformat() if hasattr(v, "isoformat") else str(v)
+    if depth >= _MAX_ARG_DEPTH or type(v).__name__ in _INJECTED:
+        return _SKIPPED
+    if hasattr(v, "model_dump") and callable(v.model_dump):
+        try:
+            return _plain(v.model_dump(mode="json"), depth + 1)
+        except Exception:
+            return _SKIPPED
+    if dataclasses.is_dataclass(v) and not isinstance(v, type):
+        return _plain({f.name: getattr(v, f.name, None) for f in dataclasses.fields(v)}, depth + 1)
+    if isinstance(v, dict):
+        out = {}
+        for k, x in v.items():
+            p = _plain(x, depth + 1)
+            if p is not _SKIPPED:
+                out[str(k)] = p
+        return out
+    if isinstance(v, (list, tuple, set, frozenset)):
+        return [p for p in (_plain(x, depth + 1) for x in v) if p is not _SKIPPED]
+    return _SKIPPED
 
 
 # ── Auto-instrumentation (two-line auto-install) ─────────────────
@@ -345,18 +477,13 @@ def instrument(
     # ── LangChain ────────────────────────────────────────────────────────
     if (wanted is None or "langchain" in wanted) and \
        ("langchain_core" in sys.modules or "langchain" in sys.modules):
+        # Through LangChain's own configure hook. It was looked for where it is
+        # not, and the fallback set an attribute LangChain never reads: init()
+        # answered langchain=True and a 5000 payment ran without Clevr being
+        # asked (measured 2026-10-14, langchain-core 0.2.43 and 1.6.10).
         try:
-            from clevr_langchain import ClevrCallbackHandler  # type: ignore
-            from langchain_core.callbacks import manager as _cbmgr  # type: ignore
-            handler = ClevrCallbackHandler(clevr_instance)
-            # LangChain has `register_configure_hook` for global handlers.
-            # The shape changed across versions, so try a couple of paths.
-            if hasattr(_cbmgr, "register_configure_hook"):
-                _cbmgr.register_configure_hook("clevr_handler", lambda inheritable: handler)
-            else:
-                # Fallback: push into the default callback list if available.
-                if hasattr(_cbmgr, "BaseCallbackManager"):
-                    setattr(_cbmgr.BaseCallbackManager, "_clevr_handler", handler)
+            from clevr_langchain import install as _install_langchain  # type: ignore
+            _install_langchain(clevr_instance)
             result["langchain"] = True
         except Exception:
             pass

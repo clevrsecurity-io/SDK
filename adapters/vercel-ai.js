@@ -39,7 +39,7 @@
 //     prompt: 'Find churn risks in Q1.',
 //   });
 
-import { ClevrBlockedError, ClevrEscalatedError } from '../index.js';
+import { ClevrBlockedError, ClevrEscalatedError, modelDoor } from '../index.js';
 
 /**
  * Wrap a single Vercel AI SDK tool with a Clevr policy gate.
@@ -126,27 +126,34 @@ export function guardTools(clevr, tools, metaByName = {}) {
  *   import { generateText } from 'ai';
  *   const generate = guardGenerate(clevr, generateText);
  *   await generate({ model, messages, tools: guardTools(clevr, tools) });
+ *
+ * `opts.tool` names the prompts (default `llm.generate`), kept under the
+ * model's door: `{ tool: 'billing' }` records `llm.billing` (see wrapModel).
  */
 export function guardGenerate(clevr, generateFn, opts = {}) {
-  const tool = opts.tool || 'llm.generate';
+  const tool = modelDoor(opts.tool, 'llm.generate');
   return async (args = {}) => {
     const convo = Array.isArray(args.messages) ? args.messages.map(toTurn) : null;
     const text = convo
       ? convo.map((m) => m.content).join('\n')
       : (typeof args.prompt === 'string' ? args.prompt
         : (typeof args.system === 'string' ? args.system : ''));
-    const verdict = await clevr.evaluate({
+    const action = {
       tool,
       runtime: clevr.runtime || 'vercel-ai',
       action_type: 'chat',
       action: text,
       conversation: convo || (text ? [{ role: 'user', content: text }] : null),
-    });
+    };
+    const verdict = await clevr.evaluate(action);
     if (clevr.mode === 'enforce') {
       if (verdict.effect === 'block') throw new ClevrBlockedError(verdict);
-      if ((verdict.effect === 'escalate' || verdict.effect === 'step_up') && clevr.onEscalate === 'throw') {
-        throw new ClevrEscalatedError(verdict);
-      }
+      const held = verdict.effect === 'escalate' || verdict.effect === 'step_up';
+      if (held && clevr.onEscalate === 'throw') throw new ClevrEscalatedError(verdict);
+      // Waits for a person, as guard() does: approved, the approval is spent by
+      // asking again with it and the model is called; refused or timed out, it
+      // throws. A held prompt reached the model at once, one a person refused too.
+      if (held && clevr.onEscalate === 'wait') await clevr.waitForDecision(verdict, action);
     } else if (verdict.effect !== 'allow') {
       clevr.lastVerdict = verdict;
     }

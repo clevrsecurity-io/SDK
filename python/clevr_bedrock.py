@@ -33,7 +33,7 @@ from __future__ import annotations
 import json
 from typing import Any, Callable, Optional
 
-from clevr import Clevr, ClevrBlockedError, ClevrEscalatedError
+from clevr import Clevr, ClevrBlockedError, ClevrEscalatedError, tool_args
 
 
 def wrap_lambda_handler(
@@ -63,6 +63,7 @@ def wrap_lambda_handler(
             "action_type": action_type,
             "action": f"{fn_name}({_short(params)})",
             "target": params.get("target") or params.get("path") or params.get("url"),
+            "target_attr": tool_args(None, (), params),
             "metadata": {"action_group": action_group, "params": params},
         }
         try:
@@ -94,6 +95,7 @@ def guard(
             "runtime": getattr(clevr, "runtime", None) or "bedrock",
             "action_type": action_type,
             "action": f"{name}({_short(kwargs)})",
+            "target_attr": tool_args(fn, (), kwargs),
             "metadata": {"kwargs": _short(kwargs)},
         }
         try:

@@ -93,6 +93,11 @@ export class ClevrCallbackHandler {
     this.name = 'ClevrCallbackHandler';
     this.ignoreLLM = false; // also evaluate the prompt at the model boundary
     this.ignoreChain = true;
+    // LangChain swallows what a handler throws (a console.warn) unless it sets
+    // raiseError, and runs it in the background unless it sets awaitHandlers:
+    // without both, a Block or a Hold thrown here never stopped the tool.
+    this.raiseError = true;
+    this.awaitHandlers = true;
   }
 
   // Model boundary: evaluate the PROMPT / conversation BEFORE the model runs, so
@@ -117,31 +122,43 @@ export class ClevrCallbackHandler {
       const u = conversation.find((m) => m.role === 'user');
       if (u && typeof u.content === 'string') this.clevr.sessionGoal = u.content.slice(0, 300);
     }
-    const verdict = await this.clevr.evaluate({
+    const action = {
       tool: 'llm.messages',
       runtime: this.clevr.runtime || 'langchain',
       action_type: 'chat',
       action: conversation.map((m) => m.content).join('\n'),
       conversation,
-    });
+    };
+    const verdict = await this.clevr.evaluate(action);
     if (this.clevr.mode === 'enforce') {
       if (verdict.effect === 'block') throw new ClevrBlockedError(verdict);
-      if ((verdict.effect === 'escalate' || verdict.effect === 'step_up') && this.clevr.onEscalate === 'throw') {
-        throw new ClevrEscalatedError(verdict);
-      }
+      const held = verdict.effect === 'escalate' || verdict.effect === 'step_up';
+      if (held && this.clevr.onEscalate === 'throw') throw new ClevrEscalatedError(verdict);
+      // The model waits for a person as a tool does: a held prompt reached the
+      // model at once, one a person refused too.
+      if (held && this.clevr.onEscalate === 'wait') await this.clevr.waitForDecision(verdict, action);
     } else if (verdict.effect !== 'allow') {
       this.clevr.lastVerdict = verdict;
     }
   }
 
-  async handleToolStart(tool, input, runId) {
-    const name = tool?.name || tool?.id?.slice(-1)?.[0] || 'unknown_tool';
-    const verdict = await this.clevr.evaluate({
+  // LangChain passes the tool serialized without its name (id ends with the
+  // class, DynamicStructuredTool); the name comes as runName.
+  async handleToolStart(tool, input, runId, _parentRunId, _tags, _metadata, runName) {
+    const name = tool?.name || runName || tool?.id?.slice(-1)?.[0] || 'unknown_tool';
+    const text = typeof input === 'string' ? input : safeJson(input, Infinity);
+    const args = toolArgs(input);
+    const action = {
       tool: name,
+      runtime: this.clevr.runtime || 'langchain',
       action_type: this.actionType,
-      action: `${name}(${truncate(String(input), 200)})`,
-      metadata: { input: truncate(String(input), 500) },
-    });
+      action: `${name}(${truncate(text, 200)})`,
+      // Whole, for a rule on an argument (target.amount > 1000); the string
+      // under metadata is only for display.
+      ...(args ? { target_attr: args } : {}),
+      metadata: { input: truncate(text, 500) },
+    };
+    const verdict = await this.clevr.evaluate(action);
     this._verdicts.set(String(runId), verdict);
 
     if (this.clevr.mode === 'enforce') {
@@ -149,8 +166,13 @@ export class ClevrCallbackHandler {
       // 'step_up' is the legacy synonym for a held/escalate verdict (the gateway,
       // hooks and other adapters all treat it as a hold); without it a step_up
       // tool call would run instead of being held.
-      if ((verdict.effect === 'escalate' || verdict.effect === 'step_up') && this.clevr.onEscalate === 'throw') {
-        throw new ClevrEscalatedError(verdict);
+      const held = verdict.effect === 'escalate' || verdict.effect === 'step_up';
+      if (held && this.clevr.onEscalate === 'throw') throw new ClevrEscalatedError(verdict);
+      // Waits for a person, as guard() does: approved, the approval is spent by
+      // asking again with it and LangChain runs the tool; rejected, timed out or
+      // already waiting (held_as), it throws and the tool does not run.
+      if (held && this.clevr.onEscalate === 'wait') {
+        this._verdicts.set(String(runId), await this.clevr.waitForDecision(verdict, action));
       }
     }
   }
@@ -168,10 +190,28 @@ export class ClevrCallbackHandler {
   }
 }
 
-function safeJson(v) {
-  try { return JSON.stringify(v).slice(0, 200); } catch { return String(v).slice(0, 200); }
+function safeJson(v, n = 200) {
+  try { return String(JSON.stringify(v)).slice(0, n); } catch { return String(v).slice(0, n); }
 }
 function truncate(s, n) { return s.length <= n ? s : s.slice(0, n - 1) + '…'; }
+
+// A tool input longer than this is not parsed for its arguments.
+const MAX_INPUT_READ = 100_000;
+
+// The tool's arguments from what handleToolStart receives: LangChain passes the
+// JSON of the arguments, or of the whole tool call on 0.3's tool.call(toolCall).
+// Anything else (a string tool's text) has no arguments to read.
+function toolArgs(input) {
+  let v = input;
+  if (typeof v === 'string') {
+    const s = v.trim();
+    if (!s.startsWith('{') || s.length > MAX_INPUT_READ) return null;
+    try { v = JSON.parse(s); } catch { return null; }
+  }
+  const isObject = (o) => o != null && typeof o === 'object' && !Array.isArray(o);
+  if (!isObject(v)) return null;
+  return v.type === 'tool_call' && isObject(v.args) ? v.args : v;
+}
 
 // Duck-type LangChain BaseMessage[] → a [{role, content}] conversation without
 // importing langchain. _getType() returns human/ai/system/tool; content is a

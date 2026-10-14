@@ -14,19 +14,21 @@ Two integration styles, depending on how the LangChain code is structured:
 
        clevr = Clevr(agent="researcher")
 
-       @guarded(clevr, tool_name="kb_search", action_type="read")
        @tool
+       @guarded(clevr, tool_name="kb_search", action_type="read")
        def kb_search(query: str) -> str:
            return my_kb.search(query)
 
 2. **Callback handler** — for code paths where tools come from elsewhere
-   (LangGraph, agent executors). Hooks into LangChain's BaseCallbackHandler:
+   (LangGraph, agent executors). A LangChain BaseCallbackHandler:
 
-       from langchain_core.callbacks import BaseCallbackHandler
        from clevr_langchain import ClevrCallbackHandler
 
        handler = ClevrCallbackHandler(clevr)
        agent_executor.invoke({"input": ...}, {"callbacks": [handler]})
+
+   Or, with no callbacks to pass, `install(clevr)` (what `clevr.init()` does)
+   adds the handler to every run LangChain configures in this process.
 
 The handler captures `on_tool_start`/`on_tool_end` events and calls evaluate
 on each. Block/escalate verdicts surface back as tool errors that the LLM
@@ -35,10 +37,24 @@ can react to. In shadow mode, decisions are recorded but tools always run.
 
 from __future__ import annotations
 
+import ast
+import json
 from functools import wraps
 from typing import Any, Callable, Optional
 
-from clevr import Clevr, ClevrBlockedError, ClevrEscalatedError
+from clevr import Clevr, ClevrBlockedError, ClevrEscalatedError, tool_args
+
+# A tool input longer than this is not parsed for its arguments.
+_MAX_INPUT_READ = 100_000
+
+try:
+    # A real callback handler: LangChain reads its ignore_* flags and calls every
+    # event on it. A class that only duck-typed the tool events made each tool
+    # call fail with AttributeError, before Clevr was asked (measured 2026-10-14,
+    # langchain-core 0.2.43 and 1.6.10). Without LangChain it is never called.
+    from langchain_core.callbacks import BaseCallbackHandler as _CallbackBase
+except ImportError:  # pragma: no cover
+    _CallbackBase = object
 
 
 def guarded(clevr: Clevr, tool_name: str, action_type: str = "tool_call",
@@ -72,6 +88,9 @@ def guarded(clevr: Clevr, tool_name: str, action_type: str = "tool_call",
                 "action": f"{tool_name}({_short(kwargs)})",
                 "target": target,
                 "environment": environment,
+                # Whole, for a rule on an argument (target.amount > 1000); the
+                # strings below are only for display.
+                "target_attr": tool_args(fn, args, kwargs),
                 "metadata": {"args": _short(args), "kwargs": _short(kwargs)},
             }
             return clevr.guard(action, run=lambda _v: fn(*args, **kwargs))
@@ -79,17 +98,21 @@ def guarded(clevr: Clevr, tool_name: str, action_type: str = "tool_call",
     return decorator
 
 
-class ClevrCallbackHandler:
-    """LangChain BaseCallbackHandler-compatible interceptor.
+class ClevrCallbackHandler(_CallbackBase):
+    """LangChain callback handler that gates every tool call.
 
     Use this when you can't easily decorate each tool — e.g. when LangChain's
     AgentExecutor pulls tools from a registry. Hook it as a callback and
     every tool invocation is guarded transparently.
-
-    Implementation note: we don't subclass BaseCallbackHandler at import time
-    because we don't want clevr.py to require langchain as a dependency.
-    Users instantiate this class explicitly; it duck-types the callback API.
     """
+
+    # A verdict that stops the tool must reach the caller: LangChain logs a
+    # handler's exception and runs the tool anyway unless the handler asks for it
+    # to be raised. An engine that cannot be reached stops the tool too, as it
+    # does through guarded(). Not run_inline: an async run waits for the handler
+    # in a worker thread either way, and inline it held the event loop for the
+    # engine's whole answer (4 parallel calls, 500 ms each: 2.0 s, not 0.5 s).
+    raise_error = True
 
     def __init__(self, clevr: Clevr, action_type: str = "tool_call") -> None:
         self.clevr = clevr
@@ -98,13 +121,15 @@ class ClevrCallbackHandler:
 
     def on_tool_start(self, serialized: dict, input_str: str, *, run_id: Any, **kwargs: Any) -> None:
         tool_name = (serialized or {}).get("name") or "unknown_tool"
-        verdict = self.clevr.evaluate({
+        action = {
             "tool": tool_name,
             "runtime": getattr(self.clevr, "runtime", None) or "langchain",
             "action_type": self.action_type,
             "action": f"{tool_name}({_truncate(input_str, 200)})",
+            "target_attr": _input_args(input_str, kwargs.get("inputs")),
             "metadata": {"input": _truncate(input_str, 500)},
-        })
+        }
+        verdict = self.clevr.evaluate(action)
         self._verdicts[str(run_id)] = verdict
         if self.clevr.mode == "enforce":
             effect = verdict.get("effect")
@@ -114,6 +139,11 @@ class ClevrCallbackHandler:
             # it a step_up tool call would run instead of being held.
             if effect in ("escalate", "step_up") and self.clevr.on_escalate == "throw":
                 raise ClevrEscalatedError(verdict)
+            # Waits for a person, as guarded() does: approved, the approval is spent
+            # by asking again with it and LangChain runs the tool; rejected, timed
+            # out or already waiting (held_as), it raises and the tool does not run.
+            if effect in ("escalate", "step_up") and self.clevr.on_escalate == "wait":
+                self._verdicts[str(run_id)] = self.clevr._wait_then_run(verdict, lambda spent: spent, action)
         # shadow mode: let the tool run, retain verdict for on_tool_end
 
     def on_tool_end(self, output: str, *, run_id: Any, **kwargs: Any) -> None:
@@ -127,9 +157,47 @@ class ClevrCallbackHandler:
         self._verdicts.pop(str(run_id), None)
 
 
+_INSTALLED: Optional[ClevrCallbackHandler] = None
+
+
+def install(clevr: Clevr) -> ClevrCallbackHandler:
+    """Gate every LangChain tool call in this process through `clevr`, with no
+    callbacks to pass: the handler joins each run LangChain configures, the way
+    its own tracer does. Called again, the gate moves to the new client."""
+    global _INSTALLED
+    if _INSTALLED is None:
+        from contextvars import ContextVar
+        from langchain_core.tracers.context import register_configure_hook
+        _INSTALLED = ClevrCallbackHandler(clevr)
+        # The variable's default, not a value set here: a thread started later
+        # has none of this context and still sees it.
+        register_configure_hook(ContextVar("clevr_callback_handler", default=_INSTALLED), True)
+    else:
+        _INSTALLED.clevr = clevr
+    return _INSTALLED
+
+
+def _input_args(input_str: Any, inputs: Any) -> Optional[dict]:
+    """The tool's arguments from what on_tool_start receives. langchain-core
+    passes the input dict as `inputs`; older releases pass only input_str, which
+    is the JSON the model wrote, or str() of the dict, a Python literal."""
+    if isinstance(inputs, dict):
+        return tool_args(None, (), inputs)
+    s = input_str.strip() if isinstance(input_str, str) else ""
+    if not s.startswith("{") or len(s) > _MAX_INPUT_READ:
+        return None
+    try:
+        parsed = json.loads(s)
+    except ValueError:
+        try:
+            parsed = ast.literal_eval(s)
+        except Exception:
+            return None
+    return tool_args(None, (), parsed) if isinstance(parsed, dict) else None
+
+
 def _short(obj: Any) -> str:
     try:
-        import json
         return json.dumps(obj, default=str)[:200]
     except Exception:
         return str(obj)[:200]

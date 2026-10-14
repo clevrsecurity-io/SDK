@@ -17,6 +17,7 @@ from clevr import Clevr, chain, ClevrBlockedError
 
 def main() -> None:
     clevr = Clevr(agent="demo-researcher", mode="shadow")
+    clevr.start_session(goal="Look into the incident archive")
     clevr.with_root_human("alice@acme.com", display="Alice · Demo")
 
     # Action 1 — safe read, would be allowed

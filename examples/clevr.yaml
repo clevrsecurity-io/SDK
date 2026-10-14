@@ -3,7 +3,7 @@
 # Push it with a console session token, an administrator's since this file
 # permits tools (the agent key, clevr_sk_..., is refused):
 #   CLEVR_URL=https://your-engine.example.com CLEVR_API_KEY=<session token> \
-#     npx @clevr/sdk policy push clevr.yaml
+#     node sdk/cli.js policy push clevr.yaml   (from the source tree; the SDK is not published yet)
 #
 # Verdicts:
 #   permit  let the action through (Clevr internal: allow)

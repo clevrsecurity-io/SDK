@@ -39,7 +39,7 @@ import json
 from functools import wraps
 from typing import Any, Callable, Optional
 
-from clevr import Clevr, ClevrBlockedError, ClevrEscalatedError
+from clevr import Clevr, ClevrBlockedError, ClevrEscalatedError, tool_args
 
 
 def guarded(
@@ -69,6 +69,7 @@ def guarded(
                 "action": f"{name}({_short(kwargs)})",
                 "target": target,
                 "environment": environment,
+                "target_attr": tool_args(fn, args, kwargs),
                 "metadata": {"args": _short(args), "kwargs": _short(kwargs)},
             }
 

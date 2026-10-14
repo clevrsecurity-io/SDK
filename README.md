@@ -19,6 +19,7 @@ const clevr = new Clevr({
   agent:  'oncall-agent',
   mode:   'shadow',          // observe-only until you trust the policies
 });
+clevr.startSession({ goal: 'Investigate the login spike' });  // once per run
 
 const result = await clevr.guard(
   { tool: 'kb.search', target: 'kb/incidents', action_type: 'read',
@@ -26,6 +27,11 @@ const result = await clevr.guard(
   async () => kb.search('login spike'),
 );
 ```
+
+`startSession` opens one session for the run: call it at the start of each run
+and keep the same client until the run ends. Without it, Clevr groups the
+agent's calls by silence and opens a new session after 30 minutes without
+activity.
 
 In `enforce` mode (default), `guard()` throws `ClevrBlockedError` if the
 policy blocks the action, or `ClevrEscalatedError` if it requires human

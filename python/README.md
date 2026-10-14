@@ -19,6 +19,7 @@ clevr = Clevr(
     agent="oncall-agent",
     mode="shadow",  # observe-only until you trust the policies
 )
+clevr.start_session(goal="Investigate the login spike")  # once per run
 
 result = clevr.guard(
     {"tool": "kb.search", "target": "kb/incidents", "action_type": "read",
@@ -26,6 +27,11 @@ result = clevr.guard(
     run=lambda _v: kb.search("login spike"),
 )
 ```
+
+`start_session` opens one session for the run: call it at the start of each
+run and keep the same client until the run ends. Without it, Clevr groups the
+agent's calls by silence and opens a new session after 30 minutes without
+activity.
 
 In `enforce` mode (default), `guard()` raises `ClevrBlockedError` on block
 and `ClevrEscalatedError` on escalation. In `shadow` mode, the inner function
