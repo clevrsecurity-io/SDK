@@ -58,6 +58,12 @@ export class Clevr {
     this.runtime = opts.runtime || process.env.CLEVR_RUNTIME || null;
     this.onEscalate = opts.onEscalate || 'throw'; // 'throw' | 'wait' | 'allow'
     this.fetch = opts.fetch || globalThis.fetch;
+    // How long one HTTP call to the brain may take (evaluate, card spend, the
+    // poll of a held decision). Without it an unreachable brain held the
+    // agent for as long as the platform's socket timeout, where the Python SDK
+    // gave up at ten seconds. On the deadline the call fails like any other
+    // transport error, so onEscalate / the failsafe answer as usual.
+    this.timeoutMs = Number(opts.timeoutMs ?? process.env.CLEVR_TIMEOUT_MS) || 10_000;
     this.sessionId = opts.sessionId || null;
     this.sessionGoal = opts.sessionGoal || null;
     this.parentRequestId = opts.parentRequestId || null;
@@ -77,6 +83,7 @@ export class Clevr {
     // Actor chain — root-first. Either set explicitly (e.g. on entry from a
     // human-facing handler) or built incrementally via .child().
     this.actorChain = Array.isArray(opts.actorChain) ? [...opts.actorChain] : null;
+    this._reports = new Set();
   }
 
   /**
@@ -150,22 +157,69 @@ export class Clevr {
     if (this.mode === 'shadow') {
       // Record the verdict, surface it on the returned object, but never
       // block or wait. Adoption-first stance — see CLAUDE.md & spec.
-      const result = await run(verdict);
+      const result = await this.runReported(verdict, run);
       return { result, verdict, shadow: true,
                wouldHaveBlocked: verdict.effect === 'block',
                wouldHaveEscalated: verdict.effect === 'escalate' };
     }
 
     if (verdict.effect === 'allow') {
-      return await run(verdict);
+      return await this.runReported(verdict, run);
     }
     if (verdict.effect === 'block') {
+      this.reportEnforcement(verdict.decision_id, 'denied');
       throw new ClevrBlockedError(verdict);
     }
     // escalate
     if (this.onEscalate === 'wait')  return await this.#waitThenRun(verdict, run, action);
-    if (this.onEscalate === 'allow') return await run(verdict);
+    if (this.onEscalate === 'allow') return await this.runReported(verdict, run);
+    this.reportEnforcement(verdict.decision_id, 'denied');
     throw new ClevrEscalatedError(verdict);
+  }
+
+  // The engine records its verdict; only this door knows whether the tool
+  // then ran. It says so on the decision (POST /v1/decisions/:id/enforcement,
+  // as the Claude Code hook does): 'allowed' once the tool answered, 'denied'
+  // when it threw or when this door refused to run it. The replay floor reads
+  // it: a payment whose first attempt failed may be retried, one that ran
+  // waits for a person. Without it the retry is held either way.
+
+  /**
+   * Tell Clevr what this door did with a decision: 'allowed', 'denied' or
+   * 'asked'. Never awaited by the caller, never throws: a report that cannot
+   * be sent leaves the decision unconfirmed. `flush()` waits for the ones
+   * still on their way.
+   */
+  reportEnforcement(decisionId, enforced) {
+    if (!decisionId || !['allowed', 'asked', 'denied'].includes(enforced)) return;
+    let p;
+    try {
+      p = Promise.resolve(this.fetch(`${this.base}/v1/decisions/${encodeURIComponent(decisionId)}/enforcement`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${this.apiKey}` },
+        body: JSON.stringify({ enforced }),
+        signal: AbortSignal.timeout(Math.min(this.timeoutMs, 2000)),
+      }));
+    } catch { return; }
+    const done = p.then((r) => { try { r?.body?.cancel?.(); } catch { /* read nothing */ } }, () => {});
+    this._reports.add(done);
+    done.finally(() => this._reports.delete(done));
+  }
+
+  /** Wait for the reports still on their way. Call it before a short-lived process exits. */
+  async flush() { await Promise.all([...this._reports]); }
+
+  /** Run the tool on a verdict and report how it went. */
+  async runReported(verdict, run) {
+    let result;
+    try {
+      result = await run(verdict);
+    } catch (e) {
+      this.reportEnforcement(verdict?.decision_id, 'denied');
+      throw e;
+    }
+    this.reportEnforcement(verdict?.decision_id, 'allowed');
+    return result;
   }
 
   /**
@@ -213,6 +267,7 @@ export class Clevr {
       method: 'POST',
       headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${this.apiKey}` },
       body: JSON.stringify(body),
+      signal: AbortSignal.timeout(this.timeoutMs),
     });
     if (!r.ok) {
       const text = await r.text();
@@ -249,6 +304,7 @@ export class Clevr {
         ...(resume ? { resume } : {}),
         ...(ttlSeconds ? { ttl_seconds: ttlSeconds } : {}),
       }),
+      signal: AbortSignal.timeout(this.timeoutMs),
     });
     let body = {};
     try { body = await r.json(); } catch { body = {}; }
@@ -263,24 +319,40 @@ export class Clevr {
    * `timeoutMs` (default 10 min). When resolved=approved → runs the inner fn.
    */
   async #waitThenRun(verdict, run, action, timeoutMs = 10 * 60_000) {
+    return await this.runReported(await this.waitForDecision(verdict, action, timeoutMs), run);
+  }
+
+  /**
+   * Wait for a person to decide a held verdict, as guard() does with onEscalate
+   * 'wait'. Resolves with the verdict that spent the approval, for the caller
+   * to run on; throws ClevrBlockedError on a rejection and ClevrEscalatedError
+   * on a timeout or a hold the same action already waits on (held_as).
+   */
+  async waitForDecision(verdict, action, timeoutMs = 10 * 60_000) {
     // The same action already waits for a person (held_as): this attempt is
     // settled with that request and never runs on its own, so it does not wait.
-    if (verdict.held_as) throw new ClevrEscalatedError(verdict);
+    if (verdict.held_as) { this.reportEnforcement(verdict.decision_id, 'denied'); throw new ClevrEscalatedError(verdict); }
     const start = Date.now();
     let delay = 1000;
     let deadline = start + timeoutMs;
     while (Date.now() < deadline) {
       await new Promise((r) => setTimeout(r, delay));
       delay = Math.min(delay * 1.5, 15_000);
-      const status = await this.#getDecision(verdict.decision_id);
+      // A poll that fails (the engine restarting, a network blip, a proxy's
+      // error page) is polled again, as in Python: one failed poll ended the
+      // wait with the raw TypeError while the person could still approve.
+      let status;
+      try { status = await this.#getDecision(verdict.decision_id); } catch { continue; }
       // The wait ends when the decision ends. The workspace sets how long a held
       // action may wait before it is declined on its own, the decision carries
       // that deadline, and this reads it: a ten minute constant meant a tenant
       // allowing thirty had agents giving up at ten while the console said
-      // otherwise. Five seconds past it, so the sweep wins the race and the
-      // agent reads the real answer instead of a timeout.
+      // otherwise. A minute and five seconds past it, so the sweep wins the race
+      // and the agent reads the real answer instead of a timeout: the sweep runs
+      // once a minute, and five seconds had both SDKs time out at 78 s on a one
+      // minute window while the hold could still be approved (2026-10-14).
       const ends = status?.expires_at ? Date.parse(status.expires_at) : NaN;
-      if (Number.isFinite(ends)) deadline = ends + 5_000;
+      if (Number.isFinite(ends)) deadline = ends + 65_000;
       // The engine resolves a step-up by writing 'approved' / 'rejected' on
       // the decision (override route + server-side expiry sweep). We also
       // accept the raw override effects 'allow' / 'block' defensively so a
@@ -289,39 +361,37 @@ export class Clevr {
       // Approved: the action runs on the approval, spent by asking again with
       // it, as every other door does. Run on the poll alone, it was never spent:
       // the operation read "approved, not used" for an action that had run.
-      if (res === 'approved' || res === 'allow') return await this.#spendThenRun(verdict, run, action);
+      if (res === 'approved' || res === 'allow') return await this.#spend(verdict, action);
       if (res === 'rejected' || res === 'block') {
+        this.reportEnforcement(verdict.decision_id, 'denied');
         throw new ClevrBlockedError({ ...verdict, reason: `Rejected by ${status.resolved_by}: ${status.resolution_reason}` });
       }
     }
+    this.reportEnforcement(verdict.decision_id, 'denied');
     throw new ClevrEscalatedError({ ...verdict, reason: `Escalation timed out after ${Math.round((Date.now() - start) / 1000)}s.` });
   }
 
-  /**
-   * Wait for a person to decide a held verdict, as guard() does with onEscalate
-   * 'wait', for an adapter that does not run the action itself (a callback
-   * handler). Resolves with the verdict that spent the approval; throws
-   * ClevrBlockedError on a rejection and ClevrEscalatedError on a timeout or a
-   * hold the same action already waits on (held_as).
-   */
-  async waitForDecision(verdict, action) {
-    return await this.#waitThenRun(verdict, (spent) => spent, action);
-  }
-
-  async #spendThenRun(verdict, run, action) {
+  // The approval, spent by asking again with it: the verdict the action runs on.
+  async #spend(verdict, action) {
     const spent = await this.evaluate({ ...action, resume: verdict.decision_id });
     this.lastVerdict = spent;
-    if (spent.effect === 'allow') return await run(spent);
+    if (spent.effect === 'allow') return spent;
+    this.reportEnforcement(spent.decision_id, 'denied');
     if (spent.effect === 'block') throw new ClevrBlockedError(spent);
     throw new ClevrEscalatedError(spent);
   }
 
+  // One poll of a held decision. A transport error (the deadline included) is
+  // one missed poll, never the end of the wait: the loop asks again.
   async #getDecision(decisionId) {
-    const r = await this.fetch(`${this.base}/v1/decisions/${decisionId}`, {
-      headers: { Authorization: `Bearer ${this.apiKey}` },
-    });
-    if (!r.ok) return null;
-    return await r.json();
+    try {
+      const r = await this.fetch(`${this.base}/v1/decisions/${decisionId}`, {
+        headers: { Authorization: `Bearer ${this.apiKey}` },
+        signal: AbortSignal.timeout(this.timeoutMs),
+      });
+      if (!r.ok) return null;
+      return await r.json();
+    } catch { return null; }
   }
 }
 

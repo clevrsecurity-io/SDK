@@ -167,16 +167,18 @@ async def _async_guard(
 
     if clevr.mode == "shadow":
         # Always run; surface lastVerdict for callers that want to log it.
-        return await fn(*args, **kwargs)
+        return await clevr.arun_reported(verdict, lambda: fn(*args, **kwargs))
 
     effect = verdict.get("effect")
     if effect == "allow":
-        return await fn(*args, **kwargs)
+        return await clevr.arun_reported(verdict, lambda: fn(*args, **kwargs))
     if effect == "block":
+        clevr.report_enforcement(verdict.get("decision_id"), "denied")
         raise ClevrBlockedError(verdict)
     # escalate
     if clevr.on_escalate == "allow":
-        return await fn(*args, **kwargs)
+        return await clevr.arun_reported(verdict, lambda: fn(*args, **kwargs))
+    clevr.report_enforcement(verdict.get("decision_id"), "denied")
     raise ClevrEscalatedError(verdict)
 
 

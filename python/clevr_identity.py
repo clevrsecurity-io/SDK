@@ -1,7 +1,7 @@
 """clevr identity — verifiable agent identity signer (Python).
 
 Mirror of the Node ``@clevr/sdk`` ``identity.js`` and the brain's
-``src/lib/identity_proof.js``. An agent proves it is the workload it claims by
+``src/lib/identity/identity_proof.js``. An agent proves it is the workload it claims by
 signing each ``/v1/evaluate`` request with its own Ed25519 key; the engine
 verifies the signature and pins the public key on first signed sight
 (trust-on-first-use), so identity goes from *asserted* to *verified*.

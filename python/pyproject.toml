@@ -53,6 +53,7 @@ Issues        = "https://github.com/clevrsecurity/clevr/issues"
 # rather than a package directory — simpler to vendor and less import surface.
 py-modules = [
   "clevr",
+  "clevr_identity",
   "clevr_langchain",
   "clevr_crewai",
   "clevr_pydantic_ai",

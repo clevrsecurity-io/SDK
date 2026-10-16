@@ -2,7 +2,7 @@
 // (GET /v1/decisions/:id/enforcement, every page joined: ?after=<next_after>
 // until next_after is null), with nothing but the workspace's public key:
 // order, links, hashes and signatures. Kept apart from the brain's code on
-// purpose; the canonical string is the brain's (lib/enforcement_reports.js).
+// purpose; the canonical string is the brain's (lib/ledger/enforcement_reports.js).
 // A valid history proves what Clevr was told and when, not that the target did it.
 import crypto from 'node:crypto'
 import { publicKeyFromB64 } from './examples/verify-receipts.mjs'

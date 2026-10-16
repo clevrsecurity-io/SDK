@@ -145,7 +145,7 @@ function validate (doc) {
 
 // A rule names one tool. The engine reads "notes.read, notes.write" as one name,
 // which no tool has, so the import route refuses such a rule; lint says so
-// first, in the route's words (brain/src/lib/capability_tool.js).
+// first, in the route's words (brain/src/lib/policy/capability_tool.js).
 function toolListRefusal (pattern) {
   if (typeof pattern !== 'string' || !pattern.includes(',')) return null
   const tools = pattern.split(',').map((t) => t.trim()).filter(Boolean)

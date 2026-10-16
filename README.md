@@ -104,6 +104,16 @@ depends on it.
 | `enforce` (default) | Block → throws. Escalate → throws (or polls if `onEscalate: 'wait'`). Allow → runs. |
 | `shadow` | Always runs the inner function. The verdict is recorded server-side and exposed at `clevr.lastVerdict`. Use this for the first 1-2 weeks of a deployment to find tuning gaps before flipping to enforce. |
 
+## What the tool did
+
+The engine records its verdict; only the SDK knows whether the tool then ran.
+After each guarded call it tells the engine (`POST /v1/decisions/:id/enforcement`):
+`allowed` once the tool answered, `denied` when it threw or when the SDK refused
+to run it. The console then shows the outcome on the SDK's word, and the replay
+floor lets a payment whose first attempt failed be retried, while one that ran
+waits for a person. The report is never awaited and never throws; a process
+that exits right after its last call can `await clevr.flush()` first.
+
 ## License
 
 Apache-2.0 © Clevr Security.

@@ -133,28 +133,46 @@ class ClevrCallbackHandler(_CallbackBase):
         self._verdicts[str(run_id)] = verdict
         if self.clevr.mode == "enforce":
             effect = verdict.get("effect")
+            # Refused here, before the tool: LangChain does not call on_tool_error
+            # for what on_tool_start raises, so the report goes now.
             if effect == "block":
+                self._refused(run_id, verdict)
                 raise ClevrBlockedError(verdict)
             # 'step_up' is the legacy synonym for a held/escalate verdict; without
             # it a step_up tool call would run instead of being held.
             if effect in ("escalate", "step_up") and self.clevr.on_escalate == "throw":
+                self._refused(run_id, verdict)
                 raise ClevrEscalatedError(verdict)
             # Waits for a person, as guarded() does: approved, the approval is spent
             # by asking again with it and LangChain runs the tool; rejected, timed
             # out or already waiting (held_as), it raises and the tool does not run.
             if effect in ("escalate", "step_up") and self.clevr.on_escalate == "wait":
-                self._verdicts[str(run_id)] = self.clevr._wait_then_run(verdict, lambda spent: spent, action)
+                try:
+                    self._verdicts[str(run_id)] = self.clevr.wait_for_decision(verdict, action)
+                except BaseException:
+                    self._verdicts.pop(str(run_id), None)
+                    raise
         # shadow mode: let the tool run, retain verdict for on_tool_end
 
+    # The tool answered, or raised: the decision it ran on (the hold's approval
+    # spent, when it waited) is told, as guarded() tells it.
     def on_tool_end(self, output: str, *, run_id: Any, **kwargs: Any) -> None:
         verdict = self._verdicts.pop(str(run_id), None)
+        if verdict:
+            self.clevr.report_enforcement(verdict.get("decision_id"), "allowed")
         if verdict and self.clevr.mode == "shadow" and verdict.get("effect") != "allow":
             # Caller might log this if they want; we keep it on the client
             # via clevr.last_verdict so the next code line can inspect.
             self.clevr.last_verdict = verdict
 
     def on_tool_error(self, error: BaseException, *, run_id: Any, **kwargs: Any) -> None:
+        verdict = self._verdicts.pop(str(run_id), None)
+        if verdict:
+            self.clevr.report_enforcement(verdict.get("decision_id"), "denied")
+
+    def _refused(self, run_id: Any, verdict: dict) -> None:
         self._verdicts.pop(str(run_id), None)
+        self.clevr.report_enforcement(verdict.get("decision_id"), "denied")
 
 
 _INSTALLED: Optional[ClevrCallbackHandler] = None

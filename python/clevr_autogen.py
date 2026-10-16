@@ -73,13 +73,15 @@ def guarded(
                     v = clevr.evaluate(_action(args, kwargs))
                     clevr.last_verdict = v
                     if clevr.mode == "shadow":
-                        return await fn(*args, **kwargs)
+                        return await clevr.arun_reported(v, lambda: fn(*args, **kwargs))
                     if v.get("effect") == "allow":
-                        return await fn(*args, **kwargs)
+                        return await clevr.arun_reported(v, lambda: fn(*args, **kwargs))
                     if v.get("effect") == "block":
+                        clevr.report_enforcement(v.get("decision_id"), "denied")
                         raise ClevrBlockedError(v)
                     if clevr.on_escalate == "allow":
-                        return await fn(*args, **kwargs)
+                        return await clevr.arun_reported(v, lambda: fn(*args, **kwargs))
+                    clevr.report_enforcement(v.get("decision_id"), "denied")
                     raise ClevrEscalatedError(v)
                 except ClevrBlockedError as e:
                     return f"[Clevr blocked this action: {e.verdict.get('reason', '')}]"

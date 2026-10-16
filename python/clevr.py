@@ -32,8 +32,10 @@ import json
 import math
 import numbers
 import os
+import threading
 import time
 import urllib.error
+import urllib.parse
 import urllib.request
 import uuid
 from typing import Any, Callable, Optional
@@ -116,6 +118,7 @@ class Clevr:
         self.identity_seed = identity_seed or os.environ.get("CLEVR_IDENTITY_SEED")
         self.last_verdict: Optional[dict] = None
         self.last_request_id: Optional[str] = None
+        self._reports: list[threading.Thread] = []
 
     # ─── Chain helpers ───────────────────────────────────────────────────
 
@@ -243,7 +246,7 @@ class Clevr:
 
         if self.mode == "shadow":
             return {
-                "result": run(verdict),
+                "result": self.run_reported(verdict, run),
                 "verdict": verdict,
                 "shadow": True,
                 "would_have_blocked": verdict.get("effect") == "block",
@@ -252,15 +255,77 @@ class Clevr:
 
         effect = verdict.get("effect")
         if effect == "allow":
-            return run(verdict)
+            return self.run_reported(verdict, run)
         if effect == "block":
+            self.report_enforcement(verdict.get("decision_id"), "denied")
             raise ClevrBlockedError(verdict)
         # escalate
         if self.on_escalate == "allow":
-            return run(verdict)
+            return self.run_reported(verdict, run)
         if self.on_escalate == "wait":
             return self._wait_then_run(verdict, run, action)
+        self.report_enforcement(verdict.get("decision_id"), "denied")
         raise ClevrEscalatedError(verdict)
+
+    # ─── What this door did with the verdict ─────────────────────────────
+    # The engine records its verdict; only this door knows whether the tool
+    # then ran. It says so on the decision (POST /v1/decisions/:id/enforcement,
+    # as the Claude Code hook does): 'allowed' once the tool answered, 'denied'
+    # when it raised or when this door refused to run it. The replay floor
+    # reads it: a payment whose first attempt failed may be retried, one that
+    # ran waits for a person. Without it the retry is held either way.
+
+    def report_enforcement(self, decision_id: Optional[str], enforced: str) -> None:
+        """Tell Clevr what this door did with a decision: 'allowed', 'denied'
+        or 'asked'. Sent on a thread of its own, never raises, never waits:
+        a report that cannot be sent leaves the decision unconfirmed."""
+        if not decision_id or enforced not in ("allowed", "asked", "denied"):
+            return
+        t = threading.Thread(target=self._send_report, args=(decision_id, enforced), name="clevr-report")
+        t.start()
+        if len(self._reports) > 64:
+            self._reports = [x for x in self._reports if x.is_alive()]
+        self._reports.append(t)
+
+    def flush(self, timeout: float = 5.0) -> None:
+        """Wait for the reports still on their way, up to `timeout` seconds
+        in all. Call it before a short-lived process exits."""
+        deadline = time.time() + timeout
+        for t in self._reports:
+            t.join(max(0.0, deadline - time.time()))
+        self._reports = [x for x in self._reports if x.is_alive()]
+
+    def _send_report(self, decision_id: str, enforced: str) -> None:
+        req = urllib.request.Request(
+            f"{self.base}/v1/decisions/{urllib.parse.quote(decision_id, safe='')}/enforcement",
+            data=json.dumps({"enforced": enforced}).encode("utf-8"), method="POST",
+            headers={"Content-Type": "application/json", "Authorization": f"Bearer {self.api_key}"},
+        )
+        try:
+            with urllib.request.urlopen(req, timeout=min(self.timeout, 2.0)) as r:
+                r.read()
+        except Exception:
+            pass
+
+    def run_reported(self, verdict: dict, run: Callable[[dict], Any]) -> Any:
+        """Run the tool on a verdict and report how it went."""
+        try:
+            result = run(verdict)
+        except BaseException:
+            self.report_enforcement(verdict.get("decision_id"), "denied")
+            raise
+        self.report_enforcement(verdict.get("decision_id"), "allowed")
+        return result
+
+    async def arun_reported(self, verdict: dict, run: Callable[[], Any]) -> Any:
+        """run_reported for a coroutine: `run()` returns the awaitable."""
+        try:
+            result = await run()
+        except BaseException:
+            self.report_enforcement(verdict.get("decision_id"), "denied")
+            raise
+        self.report_enforcement(verdict.get("decision_id"), "allowed")
+        return result
 
     # ─── Internal ────────────────────────────────────────────────────────
 
@@ -290,37 +355,73 @@ class Clevr:
             return json.loads(r.read().decode("utf-8"))
 
     def _wait_then_run(self, verdict: dict, run: Callable, action: dict, timeout_s: float = 600.0) -> Any:
-        """Poll the decision endpoint until the escalation is resolved by a human."""
+        """Wait for a person, then run the tool on the approval and report how it went."""
+        return self.run_reported(self.wait_for_decision(verdict, action, timeout_s), run)
+
+    def wait_for_decision(self, verdict: dict, action: dict, timeout_s: float = 600.0) -> dict:
+        """Poll the decision endpoint until the escalation is resolved by a human.
+        Waits until the decision's deadline when it carries one, else timeout_s.
+        Returns the verdict that spent the approval, for the caller to run on;
+        raises ClevrBlockedError on a rejection and ClevrEscalatedError on a
+        timeout or a hold the same action already waits on (held_as)."""
         # The same action already waits for a person (held_as): this attempt is
         # settled with that request and never runs on its own, so it does not wait.
         if verdict.get("held_as"):
+            self.report_enforcement(verdict.get("decision_id"), "denied")
             raise ClevrEscalatedError(verdict)
         decision_id = verdict.get("decision_id")
         start = time.time()
+        deadline = start + timeout_s
         delay = 1.0
-        while time.time() - start < timeout_s:
+        while time.time() < deadline:
             time.sleep(delay)
             delay = min(delay * 1.5, 15.0)
             try:
-                status = self._get(f"/v1/decisions/{decision_id}")
+                status = self._get(f"/v1/decisions/{decision_id}") or {}
             except Exception:
                 continue
-            resolution = (status or {}).get("resolution")
-            if resolution == "approved":
+            # The wait ends when the decision ends, as in the JS SDK: the workspace
+            # sets how long a held action may wait before it is declined on its own
+            # and the decision carries that deadline. A fixed 600 s had a workspace
+            # allowing thirty minutes see its Python agents give up at ten. A minute
+            # and five seconds past it, because the sweep that declines it runs once
+            # a minute: the agent reads that answer instead of a timeout.
+            ends = _timestamp(status.get("expires_at"))
+            if ends is not None:
+                deadline = ends + 65.0
+            # 'allow' / 'block' are the raw override effects, read like the
+            # resolutions they stand for, so a direct effect write still ends the wait.
+            resolution = status.get("resolution")
+            if resolution in ("approved", "allow"):
                 # Run on the approval, spent by asking again with it, as every
                 # other door does: run on the poll alone it was never spent.
                 spent = self.evaluate({**action, "resume": decision_id})
                 if spent.get("effect") == "allow":
-                    return run(spent)
+                    return spent
+                self.report_enforcement(spent.get("decision_id"), "denied")
                 if spent.get("effect") == "block":
                     raise ClevrBlockedError(spent)
                 raise ClevrEscalatedError(spent)
-            if resolution == "rejected":
+            if resolution in ("rejected", "block"):
+                self.report_enforcement(decision_id, "denied")
                 raise ClevrBlockedError({
                     **verdict,
                     "reason": f"Rejected by {status.get('resolved_by')}: {status.get('resolution_reason')}",
                 })
-        raise ClevrEscalatedError({**verdict, "reason": f"Escalation timed out after {int(timeout_s)}s"})
+        self.report_enforcement(decision_id, "denied")
+        raise ClevrEscalatedError({**verdict, "reason": f"Escalation timed out after {round(time.time() - start)}s."})
+
+
+def _timestamp(value: Any) -> Optional[float]:
+    """An ISO 8601 date as epoch seconds, or None when there is none to read."""
+    if not isinstance(value, str) or not value:
+        return None
+    # fromisoformat reads a trailing 'Z' only from Python 3.11.
+    text = value[:-1] + "+00:00" if value.endswith(("Z", "z")) else value
+    try:
+        return datetime.datetime.fromisoformat(text).timestamp()
+    except ValueError:
+        return None
 
 
 # ── The arguments of a tool call, for target_attr ───────────────────

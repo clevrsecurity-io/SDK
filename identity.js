@@ -4,7 +4,7 @@
 // request with its own Ed25519 key. The engine verifies the signature and pins
 // the public key on first signed sight (trust-on-first-use). This is the client
 // half; it MUST produce a byte-identical signing string to the brain
-// (src/lib/identity_proof.js) or the signature will not verify.
+// (src/lib/identity/identity_proof.js) or the signature will not verify.
 //
 // Server-side only (uses node:crypto). Agents that don't provision a key keep
 // working unsigned — their identity stays 'asserted'.

@@ -162,31 +162,45 @@ export class ClevrCallbackHandler {
     this._verdicts.set(String(runId), verdict);
 
     if (this.clevr.mode === 'enforce') {
-      if (verdict.effect === 'block') throw new ClevrBlockedError(verdict);
+      // Refused here, before the tool: LangChain does not call handleToolError
+      // for what handleToolStart throws, so the report goes now.
+      if (verdict.effect === 'block') { this.#refused(runId, verdict); throw new ClevrBlockedError(verdict); }
       // 'step_up' is the legacy synonym for a held/escalate verdict (the gateway,
       // hooks and other adapters all treat it as a hold); without it a step_up
       // tool call would run instead of being held.
       const held = verdict.effect === 'escalate' || verdict.effect === 'step_up';
-      if (held && this.clevr.onEscalate === 'throw') throw new ClevrEscalatedError(verdict);
+      if (held && this.clevr.onEscalate === 'throw') { this.#refused(runId, verdict); throw new ClevrEscalatedError(verdict); }
       // Waits for a person, as guard() does: approved, the approval is spent by
       // asking again with it and LangChain runs the tool; rejected, timed out or
       // already waiting (held_as), it throws and the tool does not run.
       if (held && this.clevr.onEscalate === 'wait') {
-        this._verdicts.set(String(runId), await this.clevr.waitForDecision(verdict, action));
+        try {
+          this._verdicts.set(String(runId), await this.clevr.waitForDecision(verdict, action));
+        } catch (e) { this._verdicts.delete(String(runId)); throw e; }
       }
     }
   }
 
+  // The tool answered, or threw: the decision it ran on (the hold's approval
+  // spent, when it waited) is told, as guard() tells it.
   async handleToolEnd(_output, runId) {
     const v = this._verdicts.get(String(runId));
     this._verdicts.delete(String(runId));
+    if (v) this.clevr.reportEnforcement(v.decision_id, 'allowed');
     if (v && this.clevr.mode === 'shadow' && v.effect !== 'allow') {
       this.clevr.lastVerdict = v;
     }
   }
 
   async handleToolError(_err, runId) {
+    const v = this._verdicts.get(String(runId));
     this._verdicts.delete(String(runId));
+    if (v) this.clevr.reportEnforcement(v.decision_id, 'denied');
+  }
+
+  #refused(runId, verdict) {
+    this._verdicts.delete(String(runId));
+    this.clevr.reportEnforcement(verdict.decision_id, 'denied');
   }
 }
 
