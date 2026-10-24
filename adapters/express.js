@@ -38,8 +38,11 @@
 //
 // This is the GUARD path for an HTTP surface. It calls clevr.evaluate() (not
 // guard()) because next() is the continuation — there is no inner function to
-// wrap. It honors the client's shadow mode: in shadow the verdict is recorded
-// but the request always proceeds.
+// wrap. It honors the client's shadow mode: in shadow a discretionary verdict
+// is recorded and the request proceeds; the floor's own refusal or hold is
+// applied as in enforce.
+
+import { floorStands } from '../index.js'
 
 export function clevrGate (clevr, opts = {}) {
   const {
@@ -99,8 +102,8 @@ export function clevrGate (clevr, opts = {}) {
 
     req.clevr = verdict
 
-    // Shadow mode records the verdict server-side but never enforces.
-    if (clevr.mode === 'shadow') return next()
+    // Shadow mode records a discretionary verdict and lets the request through.
+    if (clevr.mode === 'shadow' && !floorStands(verdict)) return next()
 
     if (verdict.effect === 'allow') return next()
     if (verdict.effect === 'escalate' && onEscalate === 'allow') return next()

@@ -16,7 +16,7 @@
 // registry). It duck-types LangChain's BaseCallbackHandler shape so it can
 // be passed via `{ callbacks: [handler] }` without importing langchain.
 
-import { ClevrBlockedError, ClevrEscalatedError } from '../index.js';
+import { ClevrBlockedError, ClevrEscalatedError, floorStands } from '../index.js';
 
 /**
  * Wrap a single LangChain tool with a Clevr policy gate.
@@ -130,7 +130,7 @@ export class ClevrCallbackHandler {
       conversation,
     };
     const verdict = await this.clevr.evaluate(action);
-    if (this.clevr.mode === 'enforce') {
+    if (this.clevr.mode === 'enforce' || floorStands(verdict)) {
       if (verdict.effect === 'block') throw new ClevrBlockedError(verdict);
       const held = verdict.effect === 'escalate' || verdict.effect === 'step_up';
       if (held && this.clevr.onEscalate === 'throw') throw new ClevrEscalatedError(verdict);
@@ -161,7 +161,7 @@ export class ClevrCallbackHandler {
     const verdict = await this.clevr.evaluate(action);
     this._verdicts.set(String(runId), verdict);
 
-    if (this.clevr.mode === 'enforce') {
+    if (this.clevr.mode === 'enforce' || floorStands(verdict)) {
       // Refused here, before the tool: LangChain does not call handleToolError
       // for what handleToolStart throws, so the report goes now.
       if (verdict.effect === 'block') { this.#refused(runId, verdict); throw new ClevrBlockedError(verdict); }
@@ -193,9 +193,8 @@ export class ClevrCallbackHandler {
   }
 
   async handleToolError(_err, runId) {
-    const v = this._verdicts.get(String(runId));
+    // A callback error may follow a committed operation; it is not a gate refusal.
     this._verdicts.delete(String(runId));
-    if (v) this.clevr.reportEnforcement(v.decision_id, 'denied');
   }
 
   #refused(runId, verdict) {

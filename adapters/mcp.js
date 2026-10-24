@@ -14,7 +14,7 @@
 // In shadow mode the wrapper logs what WOULD have been blocked but lets the
 // call through — zero-friction adoption while you build trust in the policies.
 
-import { Clevr, chain } from '../index.js';
+import { Clevr, chain, floorStands } from '../index.js';
 
 /**
  * Wrap an MCP tool handler. `originalHandler({ name, arguments })` is the
@@ -55,9 +55,9 @@ export function wrapMcpHandler(originalHandler, { clevr, mcpAgentId = 'mcp-gatew
       action: `MCP ${toolName}(${JSON.stringify(args).slice(0, 200)})`,
       metadata: { mcp_request: req.id, args },
     }, async (verdict) => {
-      // In shadow mode verdict.effect may be 'block' but we still run — the
-      // caller can log what would have happened.
-      if (scoped.mode === 'shadow' && verdict.effect !== 'allow') {
+      // In shadow mode a discretionary block still runs, logged; guard() has
+      // already applied the floor's own refusal or hold.
+      if (scoped.mode === 'shadow' && verdict.effect !== 'allow' && !floorStands(verdict)) {
         console.warn(`[clevr:shadow] ${toolName} would have been ${verdict.effect}: ${verdict.reason}`);
       }
       return await originalHandler(req);

@@ -28,6 +28,17 @@
 import { signIdentityProof } from './identity.js';
 export { generateIdentitySeed, signIdentityProof } from './identity.js';
 
+// The policies the floor itself decides (brain lib/floor/floor.js), read when an
+// engine older than `floor_enforced` answers.
+const FLOOR_DECIDERS = new Set(['content-risk', 'verb-risk', 'identity', 'idp-deprovisioned', 'session-stopped', 'session-proof']);
+
+/** The floor's own refusal, or the hold that took its place: applied in every mode. */
+export function floorStands(verdict) {
+  if (verdict?.floor_enforced === true) return true;
+  return (verdict?.effect === 'block' && FLOOR_DECIDERS.has(verdict.matched_policy))
+    || (verdict?.effect === 'escalate' && !!verdict?.floor_hold);
+}
+
 export class ClevrBlockedError extends Error {
   constructor(verdict) {
     super(verdict.reason || 'Action blocked by Clevr policy.');
@@ -69,10 +80,11 @@ export class Clevr {
     this.parentRequestId = opts.parentRequestId || null;
     this.parentAuthority = opts.parentAuthority || null;
     // mode: 'enforce' (default) actually blocks / escalates the action.
-    // 'shadow' records the decision server-side but ALWAYS lets the action
-    // run — so teams can ship the SDK to production with zero behavior change,
-    // gather the audit trail, see what WOULD have been blocked, and only
-    // then flip to enforce. This is the single biggest adoption unlock.
+    // 'shadow' records the decision server-side and lets the action run, so
+    // teams can ship the SDK, gather the audit trail and see what WOULD have
+    // been blocked before flipping to enforce. Like the engine's Observe, it
+    // shadows only what is discretionary: the safety floor's own refusal, or
+    // the hold that took its place, is applied in both modes.
     this.mode = opts.mode || 'enforce';
     if (this.mode !== 'enforce' && this.mode !== 'shadow') {
       throw new Error(`Clevr SDK: mode must be 'enforce' or 'shadow' (got "${this.mode}")`);
@@ -137,15 +149,20 @@ export class Clevr {
     });
   }
 
+  /** Whether this client applies the verdict: always in enforce, only the floor's in shadow. */
+  enforces(verdict) {
+    return this.mode === 'enforce' || floorStands(verdict);
+  }
+
   /**
    * Wrap a single tool execution with the policy gate.
    *
    * In `enforce` mode (default): allow runs, block throws, escalate behaves
    * per `onEscalate`.
-   * In `shadow` mode: ALWAYS runs the inner function and returns its result,
-   * regardless of the verdict. The verdict is still recorded server-side
-   * (full audit chain) and exposed via `clevr.lastVerdict` so the caller
-   * can log what WOULD have happened.
+   * In `shadow` mode: runs the inner function and returns
+   * { result, verdict, shadow, wouldHaveBlocked, wouldHaveEscalated },
+   * whatever a discretionary verdict says. The floor's refusal or hold is
+   * applied as in enforce: a refusal throws, a hold follows `onEscalate`.
    *
    * @param {object} action  { tool, target, action, action_type, environment, target_attr?, metadata? }
    * @param {function} run   async (verdict) => result  — the inner tool execution
@@ -153,16 +170,16 @@ export class Clevr {
   async guard(action, run) {
     const verdict = await this.evaluate(action);
     this.lastVerdict = verdict;
+    if (this.mode !== 'shadow') return await this.#apply(verdict, run, action);
+    const result = this.enforces(verdict)
+      ? await this.#apply(verdict, run, action)
+      : await this.runReported(verdict, run);
+    return { result, verdict, shadow: true,
+             wouldHaveBlocked: verdict.effect === 'block',
+             wouldHaveEscalated: verdict.effect === 'escalate' };
+  }
 
-    if (this.mode === 'shadow') {
-      // Record the verdict, surface it on the returned object, but never
-      // block or wait. Adoption-first stance — see CLAUDE.md & spec.
-      const result = await this.runReported(verdict, run);
-      return { result, verdict, shadow: true,
-               wouldHaveBlocked: verdict.effect === 'block',
-               wouldHaveEscalated: verdict.effect === 'escalate' };
-    }
-
+  async #apply(verdict, run, action) {
     if (verdict.effect === 'allow') {
       return await this.runReported(verdict, run);
     }
@@ -177,12 +194,8 @@ export class Clevr {
     throw new ClevrEscalatedError(verdict);
   }
 
-  // The engine records its verdict; only this door knows whether the tool
-  // then ran. It says so on the decision (POST /v1/decisions/:id/enforcement,
-  // as the Claude Code hook does): 'allowed' once the tool answered, 'denied'
-  // when it threw or when this door refused to run it. The replay floor reads
-  // it: a payment whose first attempt failed may be retried, one that ran
-  // waits for a person. Without it the retry is held either way.
+  // Report a successful tool answer as allowed, or a pre-execution refusal as denied.
+  // An exception after launch leaves side effects unconfirmed; it never proves rollback.
 
   /**
    * Tell Clevr what this door did with a decision: 'allowed', 'denied' or
@@ -211,13 +224,8 @@ export class Clevr {
 
   /** Run the tool on a verdict and report how it went. */
   async runReported(verdict, run) {
-    let result;
-    try {
-      result = await run(verdict);
-    } catch (e) {
-      this.reportEnforcement(verdict?.decision_id, 'denied');
-      throw e;
-    }
+    // A thrown tool may already have committed side effects. Leave its outcome unknown.
+    const result = await run(verdict);
     this.reportEnforcement(verdict?.decision_id, 'allowed');
     return result;
   }
@@ -274,6 +282,10 @@ export class Clevr {
       throw new Error(`Clevr evaluate failed (${r.status}): ${text}`);
     }
     const v = await r.json();
+    // Unknown protocol data must not fall through to onEscalate='allow'.
+    if (!v || typeof v !== 'object' || Array.isArray(v) || !['allow', 'block', 'escalate', 'step_up'].includes(v.effect)) {
+      throw new Error('Clevr evaluate returned an invalid verdict');
+    }
     // Delegation context for the next hop. A session the engine opened is not
     // taken over: kept on a long-lived client, it would make every later run
     // one endless session.

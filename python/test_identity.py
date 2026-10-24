@@ -4,12 +4,13 @@ Run: python3 test_identity.py   (from sdk/python/)
 
 The signing-string test is pure stdlib and always runs — it pins the wire format
 byte-for-byte, which is what makes the Python signature verify against the brain
-(src/lib/identity_proof.js) and the Node SDK (identity.js). The sign/verify tests
+(src/lib/identity/identity_proof.js) and the Node SDK (identity.js). The sign/verify tests
 need the optional 'cryptography' package and skip cleanly without it.
 """
 
 import base64
 import sys
+from unittest import SkipTest
 
 sys.path.insert(0, ".")
 from clevr_identity import identity_signing_string  # noqa: E402
@@ -41,8 +42,7 @@ def _has_crypto():
 
 def test_sign_verify_and_binding():
     if not _has_crypto():
-        print("  (skipped sign tests — 'cryptography' not installed)")
-        return
+        raise SkipTest("cryptography is not installed")
     from cryptography.exceptions import InvalidSignature
     from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PublicKey
 
@@ -74,9 +74,15 @@ def test_sign_verify_and_binding():
 
 if __name__ == "__main__":
     n = 0
+    skipped = 0
     for _name, _fn in sorted(globals().items()):
         if _name.startswith("test_") and callable(_fn):
-            _fn()
+            try:
+                _fn()
+            except SkipTest as error:
+                skipped += 1
+                print(f"  SKIP {_name}: {error}")
+                continue
             n += 1
             print(f"  ✓ {_name}")
-    print(f"\nclevr identity (python): {n} passed")
+    print(f"\nclevr identity (python): {n} passed, {skipped} skipped")

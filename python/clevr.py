@@ -41,6 +41,20 @@ import uuid
 from typing import Any, Callable, Optional
 
 
+# The policies the floor itself decides (brain lib/floor/floor.js), read when an
+# engine older than `floor_enforced` answers.
+_FLOOR_DECIDERS = {"content-risk", "verb-risk", "identity", "idp-deprovisioned", "session-stopped", "session-proof"}
+
+
+def floor_stands(verdict: Optional[dict]) -> bool:
+    """The floor's own refusal, or the hold that took its place: applied in every mode."""
+    v = verdict or {}
+    if v.get("floor_enforced") is True:
+        return True
+    return (v.get("effect") == "block" and v.get("matched_policy") in _FLOOR_DECIDERS) or (
+        v.get("effect") == "escalate" and bool(v.get("floor_hold")))
+
+
 class ClevrBlockedError(Exception):
     """Raised when the engine blocks an action in enforce mode."""
 
@@ -65,7 +79,8 @@ class Clevr:
         base:    Engine URL, default http://localhost:8787 or env CLEVR_URL.
         agent:   Agent name (used in audit + as last hop of synthesized chain).
         mode:    'enforce' (default — blocks/escalates per verdict) or 'shadow'
-                 (records the verdict but always lets the action run).
+                 (records a discretionary verdict and lets the action run; the
+                 floor's own refusal or hold is applied as in enforce).
         on_escalate: 'throw' (default) | 'wait' (polls for resolution) |
                      'allow' (runs anyway — dev only).
         session_id:   Optional session id sent on every call. Prefer start_session()
@@ -197,6 +212,9 @@ class Clevr:
             except Exception:
                 pass
         verdict = self._post("/v1/evaluate", body)
+        # An unknown response is not an escalation that may be auto-allowed.
+        if not isinstance(verdict, dict) or verdict.get("effect") not in ("allow", "block", "escalate", "step_up"):
+            raise ValueError("Clevr evaluate returned an invalid verdict")
         self.last_verdict = verdict
         # A session the engine opened is not taken over: kept on a long-lived
         # client, it would make every later run one endless session.
@@ -239,20 +257,23 @@ class Clevr:
 
         In `enforce` mode: returns the inner's result on allow, raises
         ClevrBlockedError on block, behaves per on_escalate on escalate.
-        In `shadow` mode: ALWAYS runs the inner and returns a dict
-        {result, verdict, shadow, would_have_blocked, would_have_escalated}.
+        In `shadow` mode: runs the inner and returns a dict
+        {result, verdict, shadow, would_have_blocked, would_have_escalated},
+        whatever a discretionary verdict says. The floor's refusal or hold is
+        applied as in enforce: a refusal raises, a hold follows on_escalate.
         """
         verdict = self.evaluate(action)
+        if self.mode != "shadow":
+            return self._apply(verdict, run, action)
+        return {
+            "result": self._apply(verdict, run, action) if floor_stands(verdict) else self.run_reported(verdict, run),
+            "verdict": verdict,
+            "shadow": True,
+            "would_have_blocked": verdict.get("effect") == "block",
+            "would_have_escalated": verdict.get("effect") == "escalate",
+        }
 
-        if self.mode == "shadow":
-            return {
-                "result": self.run_reported(verdict, run),
-                "verdict": verdict,
-                "shadow": True,
-                "would_have_blocked": verdict.get("effect") == "block",
-                "would_have_escalated": verdict.get("effect") == "escalate",
-            }
-
+    def _apply(self, verdict: dict, run: Callable[[dict], Any], action: dict) -> Any:
         effect = verdict.get("effect")
         if effect == "allow":
             return self.run_reported(verdict, run)
@@ -268,12 +289,8 @@ class Clevr:
         raise ClevrEscalatedError(verdict)
 
     # ─── What this door did with the verdict ─────────────────────────────
-    # The engine records its verdict; only this door knows whether the tool
-    # then ran. It says so on the decision (POST /v1/decisions/:id/enforcement,
-    # as the Claude Code hook does): 'allowed' once the tool answered, 'denied'
-    # when it raised or when this door refused to run it. The replay floor
-    # reads it: a payment whose first attempt failed may be retried, one that
-    # ran waits for a person. Without it the retry is held either way.
+    # Only a pre-execution refusal proves the gate prevented the call.
+    # A tool exception leaves side effects unconfirmed, even after an approval.
 
     def report_enforcement(self, decision_id: Optional[str], enforced: str) -> None:
         """Tell Clevr what this door did with a decision: 'allowed', 'denied'
@@ -309,21 +326,15 @@ class Clevr:
 
     def run_reported(self, verdict: dict, run: Callable[[dict], Any]) -> Any:
         """Run the tool on a verdict and report how it went."""
-        try:
-            result = run(verdict)
-        except BaseException:
-            self.report_enforcement(verdict.get("decision_id"), "denied")
-            raise
+        # An exception cannot prove that no side effect occurred.
+        result = run(verdict)
         self.report_enforcement(verdict.get("decision_id"), "allowed")
         return result
 
     async def arun_reported(self, verdict: dict, run: Callable[[], Any]) -> Any:
         """run_reported for a coroutine: `run()` returns the awaitable."""
-        try:
-            result = await run()
-        except BaseException:
-            self.report_enforcement(verdict.get("decision_id"), "denied")
-            raise
+        # Cancellation or failure after launch leaves execution uncertain.
+        result = await run()
         self.report_enforcement(verdict.get("decision_id"), "allowed")
         return result
 

@@ -35,9 +35,10 @@ activity.
 
 In `enforce` mode (default), `guard()` throws `ClevrBlockedError` if the
 policy blocks the action, or `ClevrEscalatedError` if it requires human
-approval. In `shadow` mode, the inner function always runs and the verdict
-is recorded silently — flip to `enforce` once you've watched a few days of
-audit and you're confident.
+approval. In `shadow` mode, a verdict of your own rules is recorded and the
+inner function runs; the safety floor's refusal or hold is applied as in
+`enforce`, the way the engine's Observe posture applies it. Flip to `enforce`
+once you've watched a few days of audit and you're confident.
 
 ## Framework adapters
 

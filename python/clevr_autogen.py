@@ -33,7 +33,7 @@ import json
 from functools import wraps
 from typing import Any, Callable, Optional
 
-from clevr import Clevr, ClevrBlockedError, ClevrEscalatedError, tool_args
+from clevr import Clevr, ClevrBlockedError, ClevrEscalatedError, floor_stands, tool_args
 
 
 def guarded(
@@ -72,7 +72,7 @@ def guarded(
                 try:
                     v = clevr.evaluate(_action(args, kwargs))
                     clevr.last_verdict = v
-                    if clevr.mode == "shadow":
+                    if clevr.mode == "shadow" and not floor_stands(v):
                         return await clevr.arun_reported(v, lambda: fn(*args, **kwargs))
                     if v.get("effect") == "allow":
                         return await clevr.arun_reported(v, lambda: fn(*args, **kwargs))

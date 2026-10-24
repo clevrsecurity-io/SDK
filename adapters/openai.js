@@ -126,7 +126,7 @@ export function withClevr(openai, clevr) {
           } else {
             try {
               // ONE guard() per tool: evaluates exactly once (no double-seal),
-              // respects shadow mode (always runs + records), throws on block,
+              // respects shadow mode (runs + records, the floor's refusal aside), throws on block,
               // and honors onEscalate (wait polls the SAME decision). Previously
               // this evaluate()'d then re-guard()'d on escalate (double seal) and
               // ignored shadow mode (suppressing the tool).

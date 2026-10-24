@@ -39,7 +39,7 @@
 //     prompt: 'Find churn risks in Q1.',
 //   });
 
-import { ClevrBlockedError, ClevrEscalatedError, modelDoor } from '../index.js';
+import { ClevrBlockedError, ClevrEscalatedError, floorStands, modelDoor } from '../index.js';
 
 /**
  * Wrap a single Vercel AI SDK tool with a Clevr policy gate.
@@ -146,7 +146,7 @@ export function guardGenerate(clevr, generateFn, opts = {}) {
       conversation: convo || (text ? [{ role: 'user', content: text }] : null),
     };
     const verdict = await clevr.evaluate(action);
-    if (clevr.mode === 'enforce') {
+    if (clevr.mode === 'enforce' || floorStands(verdict)) {
       if (verdict.effect === 'block') throw new ClevrBlockedError(verdict);
       const held = verdict.effect === 'escalate' || verdict.effect === 'step_up';
       if (held && clevr.onEscalate === 'throw') throw new ClevrEscalatedError(verdict);

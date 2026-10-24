@@ -15,7 +15,7 @@
 // In shadow mode the workflow keeps running and reports what WOULD have
 // been blocked — perfect for the "ship to prod with zero risk" rollout.
 
-import { Clevr, chain } from '../index.js';
+import { Clevr, chain, floorStands } from '../index.js';
 
 const action = process.argv[2] || 'unknown';
 
@@ -50,7 +50,7 @@ try {
     action: `[CI run ${runId || 'local'}] ${action} on ${repo || 'unknown-repo'}@${sha?.slice(0,7) || 'unknown'}`,
     metadata: { run_id: runId, sha, repo, mode },
   }, async (verdict) => {
-    if (clevr.mode === 'shadow' && verdict.effect !== 'allow') {
+    if (clevr.mode === 'shadow' && verdict.effect !== 'allow' && !floorStands(verdict)) {
       console.warn(`[clevr:shadow] would have been ${verdict.effect}: ${verdict.reason}`);
       console.warn(`[clevr:shadow] decision_id=${verdict.decision_id}`);
     } else {

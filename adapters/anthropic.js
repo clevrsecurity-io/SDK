@@ -101,8 +101,8 @@ export function withClevr(anthropic, clevr) {
             } else {
               try {
                 // ONE guard() per tool: evaluates exactly once (no double-seal),
-                // respects shadow mode (always runs, records the would-be
-                // verdict), throws on block, and honors onEscalate (wait polls
+                // respects shadow mode (runs and records the would-be verdict,
+                // the floor's refusal aside), throws on block, and honors onEscalate (wait polls
                 // the SAME decision). Previously the adapter evaluate()'d then
                 // re-guard()'d on escalate — a second decision + re-seal — and
                 // ignored shadow mode entirely (suppressing the tool).

@@ -32,7 +32,8 @@ Two integration styles, depending on how the LangChain code is structured:
 
 The handler captures `on_tool_start`/`on_tool_end` events and calls evaluate
 on each. Block/escalate verdicts surface back as tool errors that the LLM
-can react to. In shadow mode, decisions are recorded but tools always run.
+can react to. In shadow mode, decisions are recorded and tools run, except
+where the floor refuses or holds: that is applied in both modes.
 """
 
 from __future__ import annotations
@@ -42,7 +43,7 @@ import json
 from functools import wraps
 from typing import Any, Callable, Optional
 
-from clevr import Clevr, ClevrBlockedError, ClevrEscalatedError, tool_args
+from clevr import Clevr, ClevrBlockedError, ClevrEscalatedError, floor_stands, tool_args
 
 # A tool input longer than this is not parsed for its arguments.
 _MAX_INPUT_READ = 100_000
@@ -131,7 +132,7 @@ class ClevrCallbackHandler(_CallbackBase):
         }
         verdict = self.clevr.evaluate(action)
         self._verdicts[str(run_id)] = verdict
-        if self.clevr.mode == "enforce":
+        if self.clevr.mode == "enforce" or floor_stands(verdict):
             effect = verdict.get("effect")
             # Refused here, before the tool: LangChain does not call on_tool_error
             # for what on_tool_start raises, so the report goes now.
@@ -166,9 +167,8 @@ class ClevrCallbackHandler(_CallbackBase):
             self.clevr.last_verdict = verdict
 
     def on_tool_error(self, error: BaseException, *, run_id: Any, **kwargs: Any) -> None:
-        verdict = self._verdicts.pop(str(run_id), None)
-        if verdict:
-            self.clevr.report_enforcement(verdict.get("decision_id"), "denied")
+        # A tool error does not establish that the operation had no side effects.
+        self._verdicts.pop(str(run_id), None)
 
     def _refused(self, run_id: Any, verdict: dict) -> None:
         self._verdicts.pop(str(run_id), None)

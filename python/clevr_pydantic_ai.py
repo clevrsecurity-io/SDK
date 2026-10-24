@@ -39,7 +39,7 @@ import json
 from functools import wraps
 from typing import Any, Callable, Optional
 
-from clevr import Clevr, ClevrBlockedError, ClevrEscalatedError, tool_args
+from clevr import Clevr, ClevrBlockedError, ClevrEscalatedError, floor_stands, tool_args
 
 
 def guarded(
@@ -165,8 +165,8 @@ async def _async_guard(
     verdict = clevr.evaluate(action)
     clevr.last_verdict = verdict
 
-    if clevr.mode == "shadow":
-        # Always run; surface lastVerdict for callers that want to log it.
+    if clevr.mode == "shadow" and not floor_stands(verdict):
+        # Run what is discretionary; last_verdict keeps it for callers that log it.
         return await clevr.arun_reported(verdict, lambda: fn(*args, **kwargs))
 
     effect = verdict.get("effect")
